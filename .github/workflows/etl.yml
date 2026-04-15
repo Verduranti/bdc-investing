@@ -1,0 +1,90 @@
+name: BDC Stress Radar ETL
+
+on:
+  # Run weekdays at 6:30 PM ET (23:30 UTC).
+  # Market closes at 4 PM ET; this gives time for EDGAR filings to appear.
+  schedule:
+    - cron: '30 23 * * 1-5'
+
+  # Allow manual runs from the Actions tab — useful when testing or
+  # after wiring in a new BDC. Optionally pass specific tickers.
+  workflow_dispatch:
+    inputs:
+      tickers:
+        description: 'Comma-separated tickers to run (leave blank for all)'
+        required: false
+        default: ''
+      skip_prices:
+        description: 'Skip price fetching (faster, for filing-only updates)'
+        type: boolean
+        required: false
+        default: false
+
+jobs:
+  etl:
+    name: Run ETL Pipeline
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run ETL
+        env:
+          SUPABASE_URL:          ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY:  ${{ secrets.SUPABASE_SERVICE_KEY }}
+          EDGAR_EMAIL:           ${{ secrets.EDGAR_EMAIL }}
+          SKIP_PRICES:           ${{ inputs.skip_prices || 'false' }}
+        run: |
+          # Build ticker args from manual input (or empty for all BDCs)
+          TICKERS="${{ inputs.tickers }}"
+          TICKER_ARGS=$(echo "$TICKERS" | tr ',' ' ' | tr -s ' ')
+
+          echo "Running ETL for: ${TICKER_ARGS:-all BDCs}"
+          node server/etl/index.js $TICKER_ARGS
+
+      - name: Upload ETL log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: etl-failure-log-${{ github.run_id }}
+          path: /tmp/etl-*.log
+          retention-days: 7
+
+  # Optional: lightweight healthcheck job that alerts if ETL hasn't
+  # run successfully in 48 hours. Runs every morning.
+  healthcheck:
+    name: ETL Healthcheck
+    runs-on: ubuntu-latest
+    needs: []  # runs independently
+    if: github.event_name == 'schedule'
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check last successful ETL run
+        env:
+          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: node server/etl/healthcheck.js
