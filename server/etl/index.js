@@ -26,7 +26,7 @@ import { fetchInsiderTrades } from './edgar/form4.js';
 import { parseScheduleOfInvestments } from './edgar/scheduleParser.js';
 import { fetchAllPrices } from './market/prices.js';
 import {
-  getBdcId, upsertFilingPeriod, upsertPortfolioMetrics,
+  ensureBdcsSeeded, getBdcId, upsertFilingPeriod, upsertPortfolioMetrics,
   upsertSectorExposure, upsertValuationSnapshots,
   upsertInsiderTrades, upsertNavTrustScore, syncAlerts, logEtlRun,
 } from './db/upsert.js';
@@ -211,6 +211,9 @@ async function run() {
   console.log(`BDC Stress Radar ETL — ${new Date().toISOString()}`);
   console.log(`Processing: ${universe.map(b => b.ticker).join(', ')}`);
   console.log(`═══════════════════════════════════════`);
+
+  // Seed the bdcs table if it's empty (idempotent upsert)
+  await ensureBdcsSeeded(universe);
 
   // Fetch all prices upfront (sequential, polite to Yahoo)
   console.log('\n[prices] Fetching price history...');

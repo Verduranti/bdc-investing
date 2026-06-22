@@ -17,7 +17,31 @@ function check(result, context) {
   return result.data;
 }
 
-// ── BDC lookup helper ──────────────────────────────────────────────────────
+// ── BDC seed + lookup ──────────────────────────────────────────────────────
+
+/**
+ * Upsert all known BDCs into the bdcs table.
+ * Called once at ETL startup so the pipeline is self-seeding — no manual
+ * SQL seed step required. Safe to call on every run (conflict = do nothing).
+ *
+ * @param {Array<{ticker, cik, name, fiscalYearEnd}>} bdcUniverse
+ */
+export async function ensureBdcsSeeded(bdcUniverse) {
+  const rows = bdcUniverse.map(b => ({
+    ticker:          b.ticker,
+    name:            b.name,
+    cik:             b.cik,
+    fiscal_year_end: b.fiscalYearEnd ?? null,
+    is_active:       true,
+  }));
+
+  const result = await supabase
+    .from('bdcs')
+    .upsert(rows, { onConflict: 'ticker', ignoreDuplicates: true });
+
+  check(result, 'ensureBdcsSeeded');
+  console.log(`[db] BDCs seeded/verified: ${rows.map(r => r.ticker).join(', ')}`);
+}
 
 /** Get internal BDC id by ticker. Cached in process memory. */
 const _bdcIdCache = {};
