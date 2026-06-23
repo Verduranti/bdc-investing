@@ -197,9 +197,16 @@ begin
     'alerts','etl_runs'
   ]
   loop
-    execute format(
-      'create policy if not exists "anon_read_%s" on %I for select to anon using (true)',
-      t, t
-    );
+    if not exists (
+      select 1 from pg_policies
+      where schemaname = 'public'
+        and tablename   = t
+        and policyname  = 'anon_read_' || t
+    ) then
+      execute format(
+        'create policy "anon_read_%s" on %I for select to anon using (true)',
+        t, t
+      );
+    end if;
   end loop;
 end $$;
