@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { Activity, AlertTriangle, Table2, ScatterChart, Bell, RefreshCw, ChevronRight } from 'lucide-react';
 
 import BDCTable from './components/BDCTable';
@@ -7,10 +7,11 @@ import AlertsPanel from './components/AlertsPanel';
 import DetailDrawer from './components/DetailDrawer';
 
 import { BDC_UNIVERSE } from './data/bdcData';
+import { fetchLiveUniverse } from './data/fetchLiveUniverse';
 import { enrichBDCUniverse } from './utils/scoring';
 
-// ─── Enrich once at module load (in prod this comes from the API) ─────────────
-const ENRICHED = enrichBDCUniverse(BDC_UNIVERSE);
+// ─── Mock fallback, rendered immediately while the live fetch resolves ────────
+const MOCK_ENRICHED = enrichBDCUniverse(BDC_UNIVERSE);
 
 // ─── Summary stat cards ───────────────────────────────────────────────────────
 function StatCard({ label, value, sub, color }) {
@@ -34,6 +35,24 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('table');
   const [selectedTicker, setSelectedTicker] = useState(null);
 
+  // Start with mock data so the UI renders instantly, then swap in live
+  // Supabase data (or stay on mock, per-ticker, for anything the ETL
+  // hasn't processed yet — see fetchLiveUniverse.js).
+  const [universe, setUniverse] = useState(BDC_UNIVERSE);
+  const [dataStatus, setDataStatus] = useState({ loading: true, liveCount: 0, error: null });
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchLiveUniverse().then(({ universe: live, liveTickers, error }) => {
+      if (cancelled) return;
+      setUniverse(live);
+      setDataStatus({ loading: false, liveCount: liveTickers.length, error });
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  const ENRICHED = useMemo(() => enrichBDCUniverse(universe), [universe]);
+
   // Summary stats
   const stats = useMemo(() => {
     const totalAlerts = ENRICHED.reduce((s, b) => s + b.computed.alerts.length, 0);
@@ -43,14 +62,24 @@ export default function App() {
     const biggestDiscount = Math.min(...discounts);
     const biggestDiscountTicker = ENRICHED.find(b => b.computed.valuation.discount === biggestDiscount)?.ticker;
     return { totalAlerts, highAlerts, avgDiscount, biggestDiscount, biggestDiscountTicker };
-  }, []);
+  }, [ENRICHED]);
 
   const selectedBDC = useMemo(
     () => ENRICHED.find(b => b.ticker === selectedTicker) ?? null,
-    [selectedTicker]
+    [ENRICHED, selectedTicker]
   );
 
   const activeAlertCount = ENRICHED.reduce((s, b) => s + b.computed.alerts.filter(a => a.severity === 'high').length, 0);
+
+  const statusLabel = dataStatus.loading
+    ? 'Loading live data…'
+    : dataStatus.error
+      ? 'Live data unavailable · Mock Data'
+      : dataStatus.liveCount === 0
+        ? 'Mock Data'
+        : dataStatus.liveCount === ENRICHED.length
+          ? 'Live'
+          : `Live (${dataStatus.liveCount}/${ENRICHED.length}) · rest Mock`;
 
   return (
     <div className="min-h-screen flex flex-col bg-slate-950 text-slate-200">
@@ -61,7 +90,7 @@ export default function App() {
           <div className="flex items-center gap-2">
             <Activity size={18} className="text-indigo-400" />
             <span className="font-bold text-white tracking-tight">BDC Stress Radar</span>
-            <span className="hidden sm:inline text-xs text-slate-500 ml-1">· MVP v0.1 · Mock Data</span>
+            <span className="hidden sm:inline text-xs text-slate-500 ml-1">· MVP v0.1 · {statusLabel}</span>
           </div>
           <div className="flex items-center gap-3">
             {activeAlertCount > 0 && (
@@ -71,8 +100,8 @@ export default function App() {
               </div>
             )}
             <div className="text-xs text-slate-500 flex items-center gap-1.5">
-              <RefreshCw size={11} />
-              As of Nov 2024
+              <RefreshCw size={11} className={dataStatus.loading ? 'animate-spin' : ''} />
+              {dataStatus.loading ? 'Syncing…' : statusLabel}
             </div>
           </div>
         </div>
@@ -85,7 +114,7 @@ export default function App() {
           <StatCard
             label="BDCs Tracked"
             value={ENRICHED.length}
-            sub="Seed universe (5)"
+            sub={dataStatus.loading ? 'Loading…' : `${dataStatus.liveCount} live · ${ENRICHED.length - dataStatus.liveCount} mock`}
           />
           <StatCard
             label="Avg Discount"
@@ -186,7 +215,7 @@ export default function App() {
 
       {/* Footer */}
       <footer className="border-t border-slate-700/40 py-3 px-6 text-xs text-slate-600 text-center">
-        BDC Stress Radar MVP · Data is for research purposes only, not investment advice · Mock/seed data only
+        BDC Stress Radar MVP · Data is for research purposes only, not investment advice · {statusLabel}
       </footer>
     </div>
   );
