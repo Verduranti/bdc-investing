@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { ChevronUp, ChevronDown, ChevronsUpDown, AlertTriangle, Info, TrendingDown } from 'lucide-react';
+import DataSourceBadge from './DataSourceBadge';
 
 const SEVERITY_COLOR = {
   high: 'text-red-400',
@@ -173,8 +174,11 @@ export default function BDCTable({ data, onSelectTicker, selectedTicker }) {
               >
                 {/* Ticker */}
                 <td className="px-4 py-3">
-                  <div className="flex flex-col">
-                    <span className="font-bold text-white">{bdc.ticker}</span>
+                  <div className="flex flex-col gap-0.5">
+                    <div className="flex items-center gap-1.5">
+                      <span className="font-bold text-white">{bdc.ticker}</span>
+                      <DataSourceBadge dataSource={bdc.meta?.dataSource} />
+                    </div>
                     <span className="text-xs text-slate-500 truncate max-w-[140px]">{bdc.name}</span>
                   </div>
                 </td>

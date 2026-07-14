@@ -3,6 +3,7 @@ import {
   AreaChart, Area, BarChart, Bar,
   XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Cell
 } from 'recharts';
+import DataSourceBadge from './DataSourceBadge';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -141,6 +142,7 @@ export default function DetailDrawer({ bdc, onClose }) {
         <div>
           <div className="flex items-center gap-2">
             <span className="text-xl font-bold text-white">{bdc.ticker}</span>
+            <DataSourceBadge dataSource={meta?.dataSource} />
             <span className={`text-lg font-bold ${discountColor}`}>
               {v.discount >= 0 ? '+' : ''}{v.discount.toFixed(1)}%
             </span>
