@@ -1,0 +1,41 @@
+-- ============================================================
+-- Fix: ARCC / BXSL had incorrect CIKs baked into constants.js and
+-- seed.sql since the initial commit.
+--
+--   ARCC was seeded with CIK 0001278752 — that CIK actually belongs
+--   to MFIC (MidCap Financial Investment Corp). Every ETL run since
+--   go-live has fetched MFIC's filings, XBRL metrics, non-accrual/PIK
+--   parsing, and Form 4s and stored them under the "ARCC" row.
+--
+--   BXSL was seeded with CIK 0001655888 — that CIK actually belongs
+--   to OBDC (Blue Owl Capital Corporation). Same contamination.
+--
+-- Correct CIKs (verified against SEC EDGAR full text search +
+-- data.sec.gov/submissions):
+--   ARCC -> 0001287750
+--   BXSL -> 0001736035
+--
+-- This is also urgent independently of the contamination: bdcs.cik
+-- has a UNIQUE constraint, and MFIC/OBDC are now being added to the
+-- tracked universe (see server/etl/constants.js). Without this fix,
+-- the next ETL run will fail on insert — MFIC's real CIK collides
+-- with ARCC's stale row, OBDC's real CIK collides with BXSL's stale row.
+--
+-- Run this ONCE in the Supabase SQL editor before the next ETL run
+-- (scheduled weekdays 23:30 UTC, or before any manual workflow_dispatch
+-- against the full 46-ticker universe).
+--
+-- Safe to re-run: the DELETE is a no-op once the rows are gone, and
+-- ensureBdcsSeeded() will re-insert ARCC/BXSL with correct CIKs and
+-- fresh (correctly attributed) data on the very next ETL run.
+-- ============================================================
+
+-- Cascades to filing_periods, portfolio_metrics, sector_exposure,
+-- valuation_snapshots, insider_activity, nav_trust_scores, alerts.
+delete from bdcs where ticker in ('ARCC', 'BXSL');
+
+-- Nothing else to do here — the next ETL run's ensureBdcsSeeded()
+-- will re-insert both tickers with the correct CIKs (server/etl/constants.js
+-- and supabase/seed.sql were already fixed in the same change that
+-- produced this migration), and every downstream table will repopulate
+-- from real ARCC / BXSL filings instead of MFIC / OBDC's.
