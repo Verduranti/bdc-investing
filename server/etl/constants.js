@@ -76,7 +76,19 @@ export const XBRL_CONCEPTS = {
   niiPerShare: [
     'InvestmentIncomeNetPerShare',
     'NetInvestmentIncomeLossPerShare',
-    'EarningsPerShareBasic',           // fallback
+    // NOTE: 'EarningsPerShareBasic' was previously used as a last-resort
+    // fallback here. Do NOT re-add it — it's total GAAP EPS, which
+    // includes realized/unrealized portfolio gains/losses. That's a
+    // fundamentally different number from NII, and using it as an NII
+    // proxy produces false "uncovered dividend" alerts any quarter a BDC
+    // has unrealized markdowns (routine, not a red flag). Confirmed via
+    // FSK's Q1 2026 10-Q: EarningsPerShareBasic = -0.27 (portfolio
+    // markdown quarter) got stored as nii_per_share, producing a
+    // dividend_coverage of -1.125 and a false high-severity alert.
+    // Many BDCs (FSK included) don't tag NII under a standard us-gaap
+    // concept at all — they use filer-specific extension tags. Until
+    // those are mapped per-filer or the Schedule of Investments/MD&A
+    // parser extracts NII from text, leave it null rather than guess.
   ],
   dividendPerShare: [
     'CommonStockDividendsPerShareDeclared',

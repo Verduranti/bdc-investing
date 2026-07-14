@@ -58,16 +58,47 @@ function extractQuarterly(facts, namespace, conceptNames) {
       const entries = concept.units[unit];
       if (!Array.isArray(entries) || entries.length === 0) continue;
 
-      // Filter to 10-Q and 10-K filings only; deduplicate by period end date
+      // Filter to 10-Q and 10-K filings only; deduplicate by period end date.
+      //
+      // IMPORTANT: a single 10-Q frequently reports the SAME flow concept
+      // (NII, dividends per share, EPS, etc.) twice for the same `end`
+      // date — once as the single quarter (~3 months) and once as the
+      // fiscal-year-to-date cumulative (6mo, 9mo). Both share `end` and
+      // are usually filed in the same accession (identical `filed`
+      // timestamp), so a naive "keep latest filed" dedup can silently
+      // pick the multi-quarter cumulative value instead of the quarterly
+      // one. That corrupted GBDC's Q2 FY2026 NII and dividend-per-share
+      // (stored the 6-month YTD figures instead of the single quarter's).
+      // Prefer entries whose duration is closest to one quarter (~90
+      // days); instant facts (no `start`, e.g. NAV per share) have
+      // duration 0 and are unaffected by this at all.
       const seen = new Map();
       for (const e of entries) {
         if (!['10-Q', '10-K'].includes(e.form)) continue;
-        if (!seen.has(e.end) || e.filed > seen.get(e.end).filed) {
-          seen.set(e.end, { period: e.end, value: e.val, filed: e.filed, form: e.form });
+
+        const durationDays = e.start
+          ? (new Date(e.end) - new Date(e.start)) / 86400000
+          : 0;
+        const candidate = { period: e.end, value: e.val, filed: e.filed, form: e.form, durationDays };
+
+        const prior = seen.get(e.end);
+        if (!prior) {
+          seen.set(e.end, candidate);
+          continue;
+        }
+
+        const priorIsQuarterly = prior.durationDays <= 100;
+        const candidateIsQuarterly = durationDays <= 100;
+        if (candidateIsQuarterly && !priorIsQuarterly) {
+          seen.set(e.end, candidate);
+        } else if (candidateIsQuarterly === priorIsQuarterly && e.filed > prior.filed) {
+          seen.set(e.end, candidate);
         }
       }
 
-      const result = [...seen.values()].sort((a, b) => b.period.localeCompare(a.period));
+      const result = [...seen.values()]
+        .map(({ period, value, filed, form }) => ({ period, value, filed, form }))
+        .sort((a, b) => b.period.localeCompare(a.period));
       if (result.length > 0) return { conceptName: name, unit, data: result };
     }
   }
