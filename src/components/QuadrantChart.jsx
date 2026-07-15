@@ -122,7 +122,13 @@ function QuadrantLabels() {
 }
 
 export default function QuadrantChart({ data, selectedTicker, onSelectTicker }) {
-  const chartData = data.map(bdc => ({
+  // A BDC with no NAV Trust Score (no asset-quality data extracted yet)
+  // can't be meaningfully placed on this chart's Y-axis at all — plotting
+  // it at some default position would misrepresent it as scored.
+  const scorable = data.filter(bdc => bdc.computed.navTrust.score != null);
+  const unscored = data.length - scorable.length;
+
+  const chartData = scorable.map(bdc => ({
     ticker: bdc.ticker,
     name: bdc.name,
     discount: bdc.computed.valuation.discount,
@@ -141,6 +147,7 @@ export default function QuadrantChart({ data, selectedTicker, onSelectTicker }) 
         <h3 className="text-sm font-semibold text-slate-200">Opportunity Map</h3>
         <p className="text-xs text-slate-500 mt-0.5">
           Click a dot to select · Discount to NAV (x) vs NAV Trust Score (y)
+          {unscored > 0 && ` · ${unscored} BDC${unscored > 1 ? 's' : ''} not shown (no asset-quality data yet)`}
         </p>
       </div>
 

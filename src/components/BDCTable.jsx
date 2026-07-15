@@ -31,7 +31,16 @@ function DiscountBadge({ discount }) {
   );
 }
 
-function TrustBar({ score }) {
+function TrustBar({ score, incomplete }) {
+  if (score == null) {
+    return (
+      <div className="flex items-center gap-2">
+        <div className="flex-1 h-1.5 bg-slate-700/50 rounded-full overflow-hidden" />
+        <span className="text-xs font-mono text-slate-600 w-6 text-right" title="No asset-quality data yet">—</span>
+      </div>
+    );
+  }
+
   let barColor;
   if (score >= 75) barColor = 'bg-emerald-500';
   else if (score >= 55) barColor = 'bg-yellow-500';
@@ -41,14 +50,19 @@ function TrustBar({ score }) {
   return (
     <div className="flex items-center gap-2">
       <div className="flex-1 h-1.5 bg-slate-700 rounded-full overflow-hidden">
-        <div className={`h-full ${barColor} rounded-full transition-all`} style={{ width: `${score}%` }} />
+        <div className={`h-full ${barColor} rounded-full transition-all ${incomplete ? 'opacity-50' : ''}`} style={{ width: `${score}%` }} />
       </div>
-      <span className="text-xs font-mono text-slate-200 w-6 text-right">{score}</span>
+      <span className={`text-xs font-mono w-6 text-right ${incomplete ? 'text-slate-400' : 'text-slate-200'}`} title={incomplete ? 'Partial score — some asset-quality data still missing' : undefined}>
+        {score}{incomplete ? '*' : ''}
+      </span>
     </div>
   );
 }
 
 function CoverageChip({ coverage }) {
+  if (coverage == null) {
+    return <span className="text-xs font-mono text-slate-600" title="No dividend coverage data yet">—</span>;
+  }
   const pct = (coverage * 100).toFixed(0);
   const covered = coverage >= 1.0;
   return (
@@ -132,6 +146,13 @@ export default function BDCTable({ data, onSelectTicker, selectedTicker }) {
   const sorted = [...data].sort((a, b) => {
     const av = getValue(a, sortKey);
     const bv = getValue(b, sortKey);
+    // Nulls (missing data) always sort to the bottom regardless of
+    // direction, rather than silently coercing to 0 in the subtraction
+    // below (which would rank "unknown" as if it were the best/worst
+    // possible value depending on sort direction).
+    if (av == null && bv == null) return 0;
+    if (av == null) return 1;
+    if (bv == null) return -1;
     const cmp = typeof av === 'string' ? av.localeCompare(bv) : av - bv;
     return sortDir === 'asc' ? cmp : -cmp;
   });
@@ -218,14 +239,18 @@ export default function BDCTable({ data, onSelectTicker, selectedTicker }) {
 
                 {/* NAV Trust Score */}
                 <td className="px-4 py-3 min-w-[120px]">
-                  <TrustBar score={nt.score} />
+                  <TrustBar score={nt.score} incomplete={nt.dataCompleteness != null && nt.dataCompleteness < 1} />
                 </td>
 
                 {/* Software % */}
                 <td className="px-4 py-3 text-center font-mono text-xs">
-                  <span className={sx.software > 30 ? 'text-orange-400 font-semibold' : sx.software > 20 ? 'text-yellow-400' : 'text-slate-300'}>
-                    {sx.software.toFixed(1)}%
-                  </span>
+                  {sx.software == null ? (
+                    <span className="text-slate-600">—</span>
+                  ) : (
+                    <span className={sx.software > 30 ? 'text-orange-400 font-semibold' : sx.software > 20 ? 'text-yellow-400' : 'text-slate-300'}>
+                      {sx.software.toFixed(1)}%
+                    </span>
+                  )}
                 </td>
 
                 {/* Dividend Coverage */}
@@ -235,9 +260,13 @@ export default function BDCTable({ data, onSelectTicker, selectedTicker }) {
 
                 {/* PIK % */}
                 <td className="px-4 py-3 text-center font-mono text-xs">
-                  <span className={aq.pikIncomePct > 12 ? 'text-red-400' : aq.pikIncomePct > 8 ? 'text-orange-400' : 'text-slate-300'}>
-                    {aq.pikIncomePct.toFixed(1)}%
-                  </span>
+                  {aq.pikIncomePct == null ? (
+                    <span className="text-slate-600">—</span>
+                  ) : (
+                    <span className={aq.pikIncomePct > 12 ? 'text-red-400' : aq.pikIncomePct > 8 ? 'text-orange-400' : 'text-slate-300'}>
+                      {aq.pikIncomePct.toFixed(1)}%
+                    </span>
+                  )}
                 </td>
 
                 {/* Alerts */}

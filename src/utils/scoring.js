@@ -238,16 +238,45 @@ function scoreDividendCoverage(coverage) {
 export function computeNAVTrustScore(bdc) {
   const { assetQuality, sectorExposure } = bdc;
 
-  const components = [
-    scoreNonAccrual(assetQuality.nonAccrualFVPct),
-    scorePIK(assetQuality.pikIncomePct, assetQuality.pikIncomePriorQuarterPct),
-    scoreMarkdown(assetQuality.qoqMarkdownPct),
-    scoreSectorConcentration(sectorExposure),
-    scoreRealizedLosses(assetQuality.trailingRealizedLossesPct),
-    scoreDividendCoverage(assetQuality.dividendCoverage),
+  // Each component only runs when its required inputs actually exist.
+  // Previously missing data (null) got silently defaulted to 0 upstream,
+  // which meant every BDC with incomplete data scored identically (0.25*100
+  // + 0.20*90 + 0.20*80 + 0.15*100 + 0.10*95 + 0.10*15 = 85 for ANY BDC with
+  // all-null asset quality) — a fabricated score dressed up as real
+  // analysis. Instead: skip components with no data, renormalize the
+  // weighted average over only the components that ARE available, and
+  // report dataCompleteness so the UI can flag a partial score honestly.
+  const hasSectorData = sectorExposure?.software != null && sectorExposure?.top10HoldingsPct != null;
+
+  const allComponents = [
+    assetQuality.nonAccrualFVPct != null
+      ? scoreNonAccrual(assetQuality.nonAccrualFVPct)
+      : null,
+    (assetQuality.pikIncomePct != null && assetQuality.pikIncomePriorQuarterPct != null)
+      ? scorePIK(assetQuality.pikIncomePct, assetQuality.pikIncomePriorQuarterPct)
+      : null,
+    assetQuality.qoqMarkdownPct != null
+      ? scoreMarkdown(assetQuality.qoqMarkdownPct)
+      : null,
+    hasSectorData
+      ? scoreSectorConcentration(sectorExposure)
+      : null,
+    assetQuality.trailingRealizedLossesPct != null
+      ? scoreRealizedLosses(assetQuality.trailingRealizedLossesPct)
+      : null,
+    assetQuality.dividendCoverage != null
+      ? scoreDividendCoverage(assetQuality.dividendCoverage)
+      : null,
   ];
 
-  // Weighted sum
+  const components = allComponents.filter(Boolean);
+  const dataCompleteness = parseFloat((components.length / allComponents.length).toFixed(2));
+
+  if (components.length === 0) {
+    return { score: null, grade: 'N/A', components: [], dataCompleteness: 0 };
+  }
+
+  // Weighted sum (renormalized over available components only)
   const totalWeight = components.reduce((s, c) => s + c.weight, 0);
   const weightedScore = components.reduce((s, c) => s + c.raw * c.weight, 0);
   const score = Math.round(weightedScore / totalWeight);
@@ -260,7 +289,7 @@ export function computeNAVTrustScore(bdc) {
   else if (score >= 35) grade = 'D';
   else grade = 'F';
 
-  return { score, grade, components };
+  return { score, grade, components, dataCompleteness };
 }
 
 /**
@@ -316,19 +345,29 @@ export function generateAlerts(bdc, valuation, navTrust) {
     });
   }
 
-  // PIK spike
-  const pikDelta = assetQuality.pikIncomePct - assetQuality.pikIncomePriorQuarterPct;
-  if (pikDelta * 100 > 100) {
-    alerts.push({
-      type: 'pik_spike',
-      severity: 'high',
-      label: 'PIK Spike',
-      detail: `PIK income rose ${(pikDelta * 100).toFixed(0)}bps QoQ (${assetQuality.pikIncomePriorQuarterPct.toFixed(1)}% → ${assetQuality.pikIncomePct.toFixed(1)}%)`,
-    });
+  // PIK spike — only when both quarters' PIK data actually exist. Note:
+  // assetQuality.pikIncomePct etc. can be null when the ETL hasn't parsed
+  // the Schedule of Investments yet. `null - null` doesn't throw in JS but
+  // coerces to 0, which would silently produce a false "no change" or
+  // false "spike" reading — so this must be gated explicitly, not just
+  // left to fall through.
+  if (assetQuality.pikIncomePct != null && assetQuality.pikIncomePriorQuarterPct != null) {
+    const pikDelta = assetQuality.pikIncomePct - assetQuality.pikIncomePriorQuarterPct;
+    if (pikDelta * 100 > 100) {
+      alerts.push({
+        type: 'pik_spike',
+        severity: 'high',
+        label: 'PIK Spike',
+        detail: `PIK income rose ${(pikDelta * 100).toFixed(0)}bps QoQ (${assetQuality.pikIncomePriorQuarterPct.toFixed(1)}% → ${assetQuality.pikIncomePct.toFixed(1)}%)`,
+      });
+    }
   }
 
-  // Dividend uncovered
-  if (assetQuality.dividendCoverage < 1.0) {
+  // Dividend uncovered — only when we actually have a coverage figure.
+  // `null < 1.0` evaluates true in JS (null coerces to 0), so leaving this
+  // unguarded would fire a false "Uncovered Dividend" alert for every BDC
+  // with no NII data yet.
+  if (assetQuality.dividendCoverage != null && assetQuality.dividendCoverage < 1.0) {
     alerts.push({
       type: 'uncovered_dividend',
       severity: 'high',
@@ -348,8 +387,8 @@ export function generateAlerts(bdc, valuation, navTrust) {
     });
   });
 
-  // Software concentration
-  if (sectorExposure.software > 30) {
+  // Software concentration — guard against missing sector data
+  if (sectorExposure.software != null && sectorExposure.software > 30) {
     alerts.push({
       type: 'concentration',
       severity: 'medium',
@@ -358,8 +397,8 @@ export function generateAlerts(bdc, valuation, navTrust) {
     });
   }
 
-  // Material markdown
-  if (assetQuality.qoqMarkdownPct < -1.0) {
+  // Material markdown — guard against missing QoQ markdown data
+  if (assetQuality.qoqMarkdownPct != null && assetQuality.qoqMarkdownPct < -1.0) {
     alerts.push({
       type: 'markdown',
       severity: 'medium',

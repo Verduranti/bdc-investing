@@ -45,6 +45,15 @@ function ScoreComponentBar({ component }) {
 }
 
 function SectorBar({ label, value, threshold }) {
+  if (value == null) {
+    return (
+      <div className="flex items-center gap-2 py-0.5">
+        <span className="text-xs text-slate-400 w-24 flex-shrink-0">{label}</span>
+        <div className="flex-1 h-1.5 bg-slate-700/40 rounded-full overflow-hidden" />
+        <span className="text-xs font-mono w-8 text-right text-slate-600">—</span>
+      </div>
+    );
+  }
   const isHigh = threshold && value > threshold;
   return (
     <div className="flex items-center gap-2 py-0.5">
@@ -131,9 +140,12 @@ export default function DetailDrawer({ bdc, onClose }) {
     v.discount < -5 ? 'text-orange-400' :
     v.discount < 0 ? 'text-yellow-400' : 'text-emerald-400';
 
-  const trustColor = navTrust.score >= 75 ? 'text-emerald-400' :
+  const trustColor = navTrust.score == null ? 'text-slate-500' :
+    navTrust.score >= 75 ? 'text-emerald-400' :
     navTrust.score >= 55 ? 'text-yellow-400' :
     navTrust.score >= 35 ? 'text-orange-400' : 'text-red-400';
+
+  const scoreIncomplete = navTrust.dataCompleteness != null && navTrust.dataCompleteness < 1 && navTrust.score != null;
 
   return (
     <div className="flex flex-col h-full bg-slate-900 border-l border-slate-700/60">
@@ -164,9 +176,18 @@ export default function DetailDrawer({ bdc, onClose }) {
         {/* Key stats row */}
         <div className="grid grid-cols-2 gap-3">
           <div className="bg-slate-800/60 rounded-lg p-3">
-            <div className="text-xs text-slate-500 mb-1">NAV Trust Score</div>
-            <div className={`text-2xl font-bold ${trustColor}`}>{navTrust.score}</div>
-            <div className="text-xs text-slate-400">Grade: {navTrust.grade}</div>
+            <div className="text-xs text-slate-500 mb-1 flex items-center gap-1.5">
+              NAV Trust Score
+              {scoreIncomplete && (
+                <span title="Partial score — some asset-quality data still missing" className="px-1 py-0 rounded bg-yellow-900/40 text-yellow-400 text-[10px] font-semibold">
+                  PARTIAL
+                </span>
+              )}
+            </div>
+            <div className={`text-2xl font-bold ${trustColor}`}>{navTrust.score ?? '—'}</div>
+            <div className="text-xs text-slate-400">
+              {navTrust.score == null ? 'No asset-quality data yet' : `Grade: ${navTrust.grade}`}
+            </div>
           </div>
           <div className="bg-slate-800/60 rounded-lg p-3">
             <div className="text-xs text-slate-500 mb-1">Price / NAV</div>
@@ -199,8 +220,9 @@ export default function DetailDrawer({ bdc, onClose }) {
             <StatRow label="Discount Z-Score" value={`${v.zScore >= 0 ? '+' : ''}${v.zScore.toFixed(2)}σ`} />
             <StatRow label="Annual Dividend" value={`$${valuation.dividendAnnual.toFixed(2)}`} subValue={valuation.dividendFrequency} />
             <StatRow label="Div / NII Coverage"
-              value={`${(assetQuality.dividendCoverage * 100).toFixed(0)}%`}
-              highlight={assetQuality.dividendCoverage < 1 ? 'text-red-400' : 'text-emerald-400'}
+              value={assetQuality.dividendCoverage != null ? `${(assetQuality.dividendCoverage * 100).toFixed(0)}%` : '—'}
+              subValue={assetQuality.dividendCoverage == null ? 'No NII data yet' : undefined}
+              highlight={assetQuality.dividendCoverage == null ? 'text-slate-500' : assetQuality.dividendCoverage < 1 ? 'text-red-400' : 'text-emerald-400'}
             />
           </div>
         </div>
@@ -209,9 +231,22 @@ export default function DetailDrawer({ bdc, onClose }) {
         <div>
           <div className="text-xs font-semibold text-slate-300 mb-2 uppercase tracking-wider">NAV Trust Score Breakdown</div>
           <div className="bg-slate-800/40 rounded-lg p-3">
-            {navTrust.components.map(c => (
-              <ScoreComponentBar key={c.key} component={c} />
-            ))}
+            {navTrust.components.length === 0 ? (
+              <div className="text-xs text-slate-500 py-2">
+                No asset-quality data available yet — the ETL hasn't extracted non-accruals, PIK, markdown, sector mix, or dividend coverage for this BDC's latest filing.
+              </div>
+            ) : (
+              <>
+                {navTrust.dataCompleteness < 1 && (
+                  <div className="text-xs text-yellow-500/90 pb-2 mb-1 border-b border-slate-700/30">
+                    Partial score — based on {navTrust.components.length} of 6 components. Missing components aren't scored as "good," they're simply excluded.
+                  </div>
+                )}
+                {navTrust.components.map(c => (
+                  <ScoreComponentBar key={c.key} component={c} />
+                ))}
+              </>
+            )}
           </div>
         </div>
 
@@ -219,16 +254,25 @@ export default function DetailDrawer({ bdc, onClose }) {
         <div>
           <div className="text-xs font-semibold text-slate-300 mb-2 uppercase tracking-wider">Asset Quality</div>
           <div className="bg-slate-800/40 rounded-lg p-3">
-            <StatRow label="Non-Accrual (cost)" value={`${assetQuality.nonAccrualCostPct.toFixed(1)}%`} />
-            <StatRow label="Non-Accrual (FV)" value={`${assetQuality.nonAccrualFVPct.toFixed(1)}%`}
-              highlight={assetQuality.nonAccrualFVPct > 2 ? 'text-orange-400' : 'text-slate-200'} />
-            <StatRow label="PIK Income" value={`${assetQuality.pikIncomePct.toFixed(1)}%`}
-              subValue={`Prior: ${assetQuality.pikIncomePriorQuarterPct.toFixed(1)}% (Δ${((assetQuality.pikIncomePct - assetQuality.pikIncomePriorQuarterPct) * 100).toFixed(0)}bps)`}
-              highlight={assetQuality.pikIncomePct > 10 ? 'text-red-400' : 'text-slate-200'} />
-            <StatRow label="QoQ Markdown" value={`${assetQuality.qoqMarkdownPct >= 0 ? '+' : ''}${assetQuality.qoqMarkdownPct.toFixed(2)}%`}
-              highlight={assetQuality.qoqMarkdownPct < -0.5 ? 'text-orange-400' : 'text-slate-200'} />
-            <StatRow label="Realized Losses" value={`${assetQuality.trailingRealizedLossesPct.toFixed(1)}%`}
-              highlight={assetQuality.trailingRealizedLossesPct > 1.5 ? 'text-orange-400' : 'text-slate-200'} />
+            <StatRow label="Non-Accrual (cost)"
+              value={assetQuality.nonAccrualCostPct != null ? `${assetQuality.nonAccrualCostPct.toFixed(1)}%` : '—'} />
+            <StatRow label="Non-Accrual (FV)"
+              value={assetQuality.nonAccrualFVPct != null ? `${assetQuality.nonAccrualFVPct.toFixed(1)}%` : '—'}
+              highlight={assetQuality.nonAccrualFVPct == null ? 'text-slate-500' : assetQuality.nonAccrualFVPct > 2 ? 'text-orange-400' : 'text-slate-200'} />
+            <StatRow label="PIK Income"
+              value={assetQuality.pikIncomePct != null ? `${assetQuality.pikIncomePct.toFixed(1)}%` : '—'}
+              subValue={
+                assetQuality.pikIncomePct != null && assetQuality.pikIncomePriorQuarterPct != null
+                  ? `Prior: ${assetQuality.pikIncomePriorQuarterPct.toFixed(1)}% (Δ${((assetQuality.pikIncomePct - assetQuality.pikIncomePriorQuarterPct) * 100).toFixed(0)}bps)`
+                  : undefined
+              }
+              highlight={assetQuality.pikIncomePct == null ? 'text-slate-500' : assetQuality.pikIncomePct > 10 ? 'text-red-400' : 'text-slate-200'} />
+            <StatRow label="QoQ Markdown"
+              value={assetQuality.qoqMarkdownPct != null ? `${assetQuality.qoqMarkdownPct >= 0 ? '+' : ''}${assetQuality.qoqMarkdownPct.toFixed(2)}%` : '—'}
+              highlight={assetQuality.qoqMarkdownPct == null ? 'text-slate-500' : assetQuality.qoqMarkdownPct < -0.5 ? 'text-orange-400' : 'text-slate-200'} />
+            <StatRow label="Realized Losses"
+              value={assetQuality.trailingRealizedLossesPct != null ? `${assetQuality.trailingRealizedLossesPct.toFixed(1)}%` : '—'}
+              highlight={assetQuality.trailingRealizedLossesPct == null ? 'text-slate-500' : assetQuality.trailingRealizedLossesPct > 1.5 ? 'text-orange-400' : 'text-slate-200'} />
           </div>
         </div>
 
