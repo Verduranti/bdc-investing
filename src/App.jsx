@@ -10,9 +10,6 @@ import { BDC_UNIVERSE } from './data/bdcData';
 import { fetchLiveUniverse } from './data/fetchLiveUniverse';
 import { enrichBDCUniverse } from './utils/scoring';
 
-// ─── Mock fallback, rendered immediately while the live fetch resolves ────────
-const MOCK_ENRICHED = enrichBDCUniverse(BDC_UNIVERSE);
-
 // ─── Summary stat cards ───────────────────────────────────────────────────────
 function StatCard({ label, value, sub, color }) {
   return (
@@ -51,15 +48,28 @@ export default function App() {
     return () => { cancelled = true; };
   }, []);
 
-  const ENRICHED = useMemo(() => enrichBDCUniverse(universe), [universe]);
+  const ENRICHED_ALL = useMemo(() => enrichBDCUniverse(universe), [universe]);
 
-  // Summary stats
+  // Only show BDCs the ETL has actually processed — mock/seed rows are
+  // excluded from the table, chart, and alerts so fabricated numbers never
+  // sit alongside real ones. Anything still pending shows as a bare ticker
+  // chip instead (see "Pending ETL" row below), with no invented data.
+  const ENRICHED = useMemo(
+    () => ENRICHED_ALL.filter(b => b.meta?.dataSource !== 'mock_seed_v1'),
+    [ENRICHED_ALL]
+  );
+  const pending = useMemo(
+    () => ENRICHED_ALL.filter(b => b.meta?.dataSource === 'mock_seed_v1'),
+    [ENRICHED_ALL]
+  );
+
+  // Summary stats (live BDCs only)
   const stats = useMemo(() => {
     const totalAlerts = ENRICHED.reduce((s, b) => s + b.computed.alerts.length, 0);
     const highAlerts  = ENRICHED.reduce((s, b) => s + b.computed.alerts.filter(a => a.severity === 'high').length, 0);
     const discounts   = ENRICHED.map(b => b.computed.valuation.discount);
-    const avgDiscount = discounts.reduce((a, b) => a + b, 0) / discounts.length;
-    const biggestDiscount = Math.min(...discounts);
+    const avgDiscount = discounts.length ? discounts.reduce((a, b) => a + b, 0) / discounts.length : 0;
+    const biggestDiscount = discounts.length ? Math.min(...discounts) : 0;
     const biggestDiscountTicker = ENRICHED.find(b => b.computed.valuation.discount === biggestDiscount)?.ticker;
     return { totalAlerts, highAlerts, avgDiscount, biggestDiscount, biggestDiscountTicker };
   }, [ENRICHED]);
@@ -77,9 +87,9 @@ export default function App() {
       ? 'Live data unavailable · Mock Data'
       : dataStatus.liveCount === 0
         ? 'Mock Data'
-        : dataStatus.liveCount === ENRICHED.length
+        : dataStatus.liveCount === ENRICHED_ALL.length
           ? 'Live'
-          : `Live (${dataStatus.liveCount}/${ENRICHED.length}) · rest Mock`;
+          : `Live (${dataStatus.liveCount}/${ENRICHED_ALL.length}) · rest Pending`;
 
   return (
     <div className="min-h-screen flex flex-col bg-slate-950 text-slate-200">
@@ -112,9 +122,9 @@ export default function App() {
         {/* ── Summary cards ────────────────────────────────────────────── */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           <StatCard
-            label="BDCs Tracked"
+            label="BDCs Live"
             value={ENRICHED.length}
-            sub={dataStatus.loading ? 'Loading…' : `${dataStatus.liveCount} live · ${ENRICHED.length - dataStatus.liveCount} mock`}
+            sub={dataStatus.loading ? 'Loading…' : `${pending.length} pending ETL`}
           />
           <StatCard
             label="Avg Discount"
@@ -169,6 +179,22 @@ export default function App() {
                 );
               })}
             </div>
+
+            {/* Pending ETL — bare ticker placeholders, no fabricated data */}
+            {!dataStatus.loading && pending.length > 0 && (
+              <div className="flex flex-wrap items-center gap-1.5 text-xs">
+                <span className="text-slate-500 mr-0.5">Pending ETL ({pending.length}):</span>
+                {pending.map(b => (
+                  <span
+                    key={b.ticker}
+                    title={`${b.name} — not yet processed by the ETL`}
+                    className="px-1.5 py-0.5 rounded bg-slate-800/60 border border-slate-700/50 text-slate-500 font-mono"
+                  >
+                    {b.ticker}
+                  </span>
+                ))}
+              </div>
+            )}
 
             {/* Panel content */}
             {activeTab === 'table' && (

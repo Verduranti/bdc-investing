@@ -27,7 +27,7 @@ export const BDC_UNIVERSE = [
   { ticker: 'CION', cik: '0001534254', name: 'CION Investment Corporation',           fiscalYearEnd: 'December'  },
   { ticker: 'CSWC', cik: '0000017313', name: 'Capital Southwest Corporation',         fiscalYearEnd: 'March'     },
   { ticker: 'FDUS', cik: '0001513363', name: 'Fidus Investment Corporation',          fiscalYearEnd: 'December'  },
-  { ticker: 'FSK',  cik: '0001514281', name: 'FS KKR Capital Corp',                   fiscalYearEnd: 'December'  },
+  { ticker: 'FSK',  cik: '0001422183', name: 'FS KKR Capital Corp',                   fiscalYearEnd: 'December'  },
   { ticker: 'GAIN', cik: '0001321741', name: 'Gladstone Investment Corporation',      fiscalYearEnd: 'March'     },
   { ticker: 'GBDC', cik: '0001476765', name: 'Golub Capital BDC',                     fiscalYearEnd: 'September' },
   { ticker: 'GECC', cik: '0001675033', name: 'Great Elm Capital Corp.',               fiscalYearEnd: 'December'  },
@@ -62,7 +62,7 @@ export const BDC_UNIVERSE = [
   { ticker: 'TCPC', cik: '0001370755', name: 'BlackRock TCP Capital Corp.',           fiscalYearEnd: 'December'  },
   { ticker: 'TPVG', cik: '0001580345', name: 'TriplePoint Venture Growth BDC Corp.',  fiscalYearEnd: 'December'  },
   { ticker: 'TRIN', cik: '0001786108', name: 'Trinity Capital Inc.',                  fiscalYearEnd: 'December'  },
-  { ticker: 'TSLX', cik: '0001559846', name: 'Sixth Street Specialty Lending',        fiscalYearEnd: 'December'  },
+  { ticker: 'TSLX', cik: '0001508655', name: 'Sixth Street Specialty Lending',        fiscalYearEnd: 'December'  },
   { ticker: 'WHF',  cik: '0001552198', name: 'WhiteHorse Finance, Inc.',              fiscalYearEnd: 'December'  },
 ];
 
