@@ -98,7 +98,20 @@ async function processBDC(bdc, priceData) {
     const { portfolioMetrics: parsed, sectorExposure, notes } = parseScheduleOfInvestments(html, ticker);
 
     if (Object.keys(parsed).length > 0) {
-      await upsertPortfolioMetrics(ticker, filingPeriodId, parsed);
+      // parseScheduleOfInvestments returns snake_case keys matching the DB
+      // columns directly (non_accrual_fv_pct, etc.), but upsertPortfolioMetrics
+      // expects camelCase (nonAccrualFVPct, etc. — matching the XBRL step's
+      // convention). Without this remapping every field here silently
+      // evaluated to `undefined ?? null` inside the upsert, discarding real
+      // extracted non-accrual/PIK values even when parsing succeeded. The
+      // sectorExposure branch just below already does the equivalent
+      // remapping correctly — this mirrors that.
+      await upsertPortfolioMetrics(ticker, filingPeriodId, {
+        nonAccrualCostPct:         parsed.non_accrual_cost_pct,
+        nonAccrualFVPct:           parsed.non_accrual_fv_pct,
+        pikIncomePct:              parsed.pik_income_pct,
+        dataSource:                parsed.data_source,
+      });
       stepResults.scheduleParser = { fields: Object.keys(parsed), notes };
     }
     if (Object.keys(sectorExposure).length > 0) {

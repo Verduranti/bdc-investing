@@ -36,27 +36,57 @@ export function parseScheduleOfInvestments(html, ticker) {
   // ── Find SOI table ───────────────────────────────────────────
   // BDCs label it "Schedule of Investments" or "Consolidated Schedule"
   let soiTable = null;
+  const SOI_HEADING_RE = /schedule\s+of\s+investments/i;
 
   $('table').each((_, table) => {
-    // Look for a nearby heading or the first row containing SOI keywords
-    const tableText = $(table).text();
-    if (/schedule\s+of\s+investments/i.test(tableText)) {
+    const $table = $(table);
+
+    // First check the table's own text (catches cases where the heading
+    // is literally a header row inside the table).
+    if (SOI_HEADING_RE.test($table.text())) {
       soiTable = table;
       return false; // break
     }
+
+    // More common in practice: the heading is its own paragraph/heading
+    // element immediately BEFORE the table (e.g. "Golub Capital BDC, Inc.
+    // and Subsidiaries / Consolidated Schedule of Investments (unaudited)"
+    // as plain text right above the table), not inside the table's own
+    // markup at all — so $table.text() alone misses it. Walk back through
+    // up to a few preceding siblings looking for that heading text.
+    let $prev = $table.prev();
+    for (let i = 0; i < 6 && $prev.length; i++) {
+      if (SOI_HEADING_RE.test($prev.text())) {
+        soiTable = table;
+        return false;
+      }
+      $prev = $prev.prev();
+    }
   });
 
+  // NOTE: this used to `return` immediately when no SOI table was found,
+  // which also skipped the non-accrual/PIK text extraction below — even
+  // though that extraction runs against the whole document body and has
+  // nothing to do with whether the SOI table itself was located. That
+  // early return silently zeroed out non-accrual/PIK data for every BDC
+  // whose SOI table doesn't match the heading heuristic (very common —
+  // BDCs typically put "Consolidated Schedule of Investments" in a
+  // heading/paragraph immediately BEFORE the table, not inside the
+  // table's own cell text, so `$(table).text()` rarely contains it).
+  // Sector aggregation genuinely does need the table, so that part still
+  // no-ops when soiTable is null — but non-accrual/PIK now always run.
   if (!soiTable) {
-    notes.push('SOI table not found — check filing format');
-    return { portfolioMetrics: {}, sectorExposure: {}, notes };
+    notes.push('SOI table not found — check filing format (sector exposure unavailable, non-accrual/PIK still attempted from document text)');
   }
 
   // ── Parse rows ───────────────────────────────────────────────
   const rows = [];
-  $(soiTable).find('tr').each((_, tr) => {
-    const cells = $(tr).find('td,th').map((_, td) => $(td).text().trim()).get();
-    if (cells.length > 0) rows.push(cells);
-  });
+  if (soiTable) {
+    $(soiTable).find('tr').each((_, tr) => {
+      const cells = $(tr).find('td,th').map((_, td) => $(td).text().trim()).get();
+      if (cells.length > 0) rows.push(cells);
+    });
+  }
 
   // ── Sector aggregation ───────────────────────────────────────
   // BDCs group rows by industry header. We accumulate fair value by sector.
