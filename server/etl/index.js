@@ -106,13 +106,32 @@ async function processBDC(bdc, priceData) {
       // extracted non-accrual/PIK values even when parsing succeeded. The
       // sectorExposure branch just below already does the equivalent
       // remapping correctly — this mirrors that.
+      //
+      // niiPerShare/dividendCoverage are a special case: this text-based
+      // extraction is a *fallback* for filers whose XBRL doesn't tag NII
+      // (see xbrl.js). If Step 2 already got a real value from XBRL, we
+      // must NOT let a less-reliable text-regex match overwrite it on a
+      // later run — upsertPortfolioMetrics writes whatever non-null fields
+      // it's given, it doesn't know which source "wins", so that has to be
+      // decided here before the call.
+      const xbrlHasNii = xbrlMetrics.niiPerShare != null;
+      const textNii = parsed.nii_per_share_text;
+      const niiToWrite = (!xbrlHasNii && textNii != null) ? textNii : null;
+      const dividendCoverageToWrite = (niiToWrite != null && xbrlMetrics.dividendPerShare != null && xbrlMetrics.dividendPerShare > 0)
+        ? parseFloat((niiToWrite / xbrlMetrics.dividendPerShare).toFixed(4))
+        : null;
+
       await upsertPortfolioMetrics(ticker, filingPeriodId, {
         nonAccrualCostPct:         parsed.non_accrual_cost_pct,
         nonAccrualFVPct:           parsed.non_accrual_fv_pct,
         pikIncomePct:              parsed.pik_income_pct,
+        qoqMarkdownPct:            parsed.qoq_markdown_pct,
+        trailingRealizedLossesPct: parsed.trailing_realized_losses_pct,
+        niiPerShare:               niiToWrite,
+        dividendCoverage:          dividendCoverageToWrite,
         dataSource:                parsed.data_source,
       });
-      stepResults.scheduleParser = { fields: Object.keys(parsed), notes };
+      stepResults.scheduleParser = { fields: Object.keys(parsed), notes, niiFromText: niiToWrite != null };
     }
     if (Object.keys(sectorExposure).length > 0) {
       await upsertSectorExposure(ticker, filingPeriodId, {

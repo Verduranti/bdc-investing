@@ -166,6 +166,104 @@ export function parseScheduleOfInvestments(html, ticker) {
     notes.push(`PIK% extracted from text: ${pikIncomePct}`);
   }
 
+  // ── Document dollar scale ───────────────────────────────────
+  // BDCs almost universally caption their financial statements
+  // "(Dollar amounts in thousands)" or "...in millions" near the top of
+  // the document (often right by the SOI heading). Individual MD&A
+  // sentences ("net realized losses of $12.3 million") frequently state
+  // their own unit explicitly, which should override this document-level
+  // default when present. Getting this wrong silently produces a
+  // percentage that's off by 1000x, so scale must be resolved per-figure,
+  // not assumed globally. Default to thousands — the overwhelming norm
+  // for BDC statements — only if nothing else is stated.
+  function detectDocumentScale(text) {
+    if (/dollars?\s*(?:and\s+shares?\s*)?(?:amounts?\s*)?in\s+thousands/i.test(text)) return 1_000;
+    if (/dollars?\s*(?:and\s+shares?\s*)?(?:amounts?\s*)?in\s+millions/i.test(text)) return 1_000_000;
+    return 1_000;
+  }
+  const documentScale = detectDocumentScale(bodyText.slice(0, 5000));
+
+  // Converts a matched dollar figure + optional inline unit qualifier
+  // ("million"/"thousand") into absolute dollars. An explicit inline
+  // qualifier always wins over the document-level default scale.
+  function toAbsoluteDollars(rawStr, unitStr) {
+    const raw = parseFloat(rawStr.replace(/[$,]/g, ''));
+    if (isNaN(raw)) return null;
+    if (/million/i.test(unitStr ?? '')) return raw * 1_000_000;
+    if (/thousand/i.test(unitStr ?? '')) return raw * 1_000;
+    return raw * documentScale;
+  }
+
+  // totalFairValue (computed above from summing SOI table row values) is
+  // itself in the document's implicit unit (documentScale), since table
+  // cells are rarely individually unit-qualified. Scale it up to absolute
+  // dollars so it's comparable to the MD&A-sourced dollar figures below.
+  const totalFairValueAbs = totalFairValue > 0 ? totalFairValue * documentScale : null;
+
+  // ── Realized losses / unrealized markdown (text) ────────────
+  // Typical phrasing: "net realized gains (losses) on investments of
+  // $(12.3) million" or "net change in unrealized appreciation
+  // (depreciation) on investments of $8.1 million". A parenthesized
+  // number or the word "loss"/"depreciation" indicates a negative figure.
+  let qoqMarkdownPct = null;
+  let trailingRealizedLossesPct = null;
+
+  const DOLLAR_RE = '\\$?\\(?(-?[\\d,]+\\.?\\d*)\\)?\\s*(million|thousand)?';
+
+  const realizedMatch = bodyText.match(
+    new RegExp(`net\\s+realized\\s+(gains?|losses?)[^.]*?(?:on\\s+investments?)?[^.]*?of\\s+${DOLLAR_RE}`, 'i')
+  );
+  if (realizedMatch && totalFairValueAbs) {
+    const isLoss = /loss/i.test(realizedMatch[1]) || realizedMatch[2].includes('(');
+    const absDollars = toAbsoluteDollars(realizedMatch[2], realizedMatch[3]);
+    if (absDollars != null) {
+      // Store as a positive magnitude (% of portfolio realized-loss), per
+      // the schema convention used elsewhere (0 = no losses). A net
+      // realized GAIN is not a loss, so it maps to 0, not a negative number.
+      const magnitude = isLoss ? Math.abs(absDollars) : 0;
+      trailingRealizedLossesPct = parseFloat(((magnitude / totalFairValueAbs) * 100).toFixed(3));
+      notes.push(`Realized ${isLoss ? 'loss' : 'gain'} extracted from text: $${absDollars.toLocaleString()} → ${trailingRealizedLossesPct}% of portfolio FV`);
+    }
+  }
+
+  const markdownMatch = bodyText.match(
+    new RegExp(`net\\s+(?:change\\s+in\\s+)?unrealized\\s+(appreciation|depreciation)[^.]*?(?:on\\s+investments?)?[^.]*?of\\s+${DOLLAR_RE}`, 'i')
+  );
+  if (markdownMatch && totalFairValueAbs) {
+    const isDepreciation = /depreciation/i.test(markdownMatch[1]) || markdownMatch[2].includes('(');
+    const absDollars = toAbsoluteDollars(markdownMatch[2], markdownMatch[3]);
+    if (absDollars != null) {
+      // Signed: negative = net markdown, positive = net markup — matches
+      // ALERT_THRESHOLDS.markdownMaterial (-1.0) convention in constants.js.
+      const signedDollars = isDepreciation ? -Math.abs(absDollars) : Math.abs(absDollars);
+      qoqMarkdownPct = parseFloat(((signedDollars / totalFairValueAbs) * 100).toFixed(3));
+      notes.push(`Unrealized ${isDepreciation ? 'depreciation' : 'appreciation'} extracted from text: $${absDollars.toLocaleString()} → ${qoqMarkdownPct}% of portfolio FV`);
+    }
+  }
+
+  if ((realizedMatch || markdownMatch) && !totalFairValueAbs) {
+    notes.push('Realized-loss/markdown dollar figures found in text but no SOI-table total FV available to compute a percentage — skipped');
+  }
+
+  // ── NII per share (text) ─────────────────────────────────────
+  // XBRL tagging of net investment income per share is inconsistent
+  // across filers (see xbrl.js — many BDCs don't tag a standard concept
+  // at all). "net investment income per share of $X.XX" is, in contrast,
+  // near-universal boilerplate in BDC earnings MD&A, so this text-based
+  // extraction is meant as a fallback specifically for filers XBRL misses
+  // — the caller (index.js) is responsible for preferring XBRL when
+  // available and only falling back to this value when XBRL is null.
+  let niiPerShare = null;
+  const niiMatch = bodyText.match(
+    /net\s+investment\s+income[^.]{0,60}?per\s+share\s+of\s+\$?\(?(-?\d+\.\d+)\)?/i
+  );
+  if (niiMatch) {
+    niiPerShare = parseFloat(niiMatch[1]);
+    // A parenthesized figure denotes a negative (net investment loss).
+    if (niiMatch[0].includes('(') && niiPerShare > 0) niiPerShare = -niiPerShare;
+    notes.push(`NII/share extracted from text: $${niiPerShare}`);
+  }
+
   // ── Per-BDC overrides ────────────────────────────────────────
   // Some BDCs have consistent patterns we can be more precise about.
   // Add ticker-specific logic here as you tune each one.
@@ -188,6 +286,9 @@ export function parseScheduleOfInvestments(html, ticker) {
       non_accrual_fv_pct:  nonAccrualFVPct,
       non_accrual_cost_pct: nonAccrualCostPct,
       pik_income_pct:      pikIncomePct,
+      qoq_markdown_pct:    qoqMarkdownPct,
+      trailing_realized_losses_pct: trailingRealizedLossesPct,
+      nii_per_share_text:  niiPerShare,
       data_source:         'parsed',
     },
     sectorExposure: Object.keys(sectorExposure).length > 0
