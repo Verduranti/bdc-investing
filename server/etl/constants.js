@@ -97,6 +97,21 @@ export const XBRL_CONCEPTS = {
   totalAssets: [
     'Assets',
   ],
+  // Total portfolio investments at fair value — confirmed reliable and
+  // unambiguous via the companyconcept API (tested against BBDC's real
+  // CIK: returns exactly one clean USD value per period end, no
+  // dimensional/member breakdown mixed in). Used as the denominator for
+  // markdown % and realized-loss % — do NOT go back to summing SOI table
+  // cells for this; that heuristic was quietly summing the "% of Net
+  // Assets" column instead of the fair-value column on real filings
+  // (BDCs commonly put % of Net Assets as the LAST cell in each SOI row),
+  // producing a denominator of ~100 instead of ~$2-3B and blowing the
+  // resulting percentages up by 3-4 orders of magnitude (BBDC showed
+  // qoq_markdown_pct = -659% in production from exactly this bug).
+  totalInvestmentsFairValue: [
+    'InvestmentOwnedAtFairValue',
+    'Investments',
+  ],
   totalDebt: [
     'LongTermDebt',
     'DebtAndCapitalLeaseObligations',

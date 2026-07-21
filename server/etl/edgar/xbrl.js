@@ -125,17 +125,20 @@ export async function fetchXBRLMetrics(cik) {
   const niiResult       = extractQuarterly(facts, 'us-gaap', XBRL_CONCEPTS.niiPerShare);
   const divResult       = extractQuarterly(facts, 'us-gaap', XBRL_CONCEPTS.dividendPerShare);
   const assetsResult    = extractQuarterly(facts, 'us-gaap', XBRL_CONCEPTS.totalAssets);
+  const totalInvFVResult = extractQuarterly(facts, 'us-gaap', XBRL_CONCEPTS.totalInvestmentsFairValue);
 
   return {
     navPerShare:     navResult?.data     ?? null,
     niiPerShare:     niiResult?.data     ?? null,
     dividendPerShare: divResult?.data    ?? null,
     totalAssets:     assetsResult?.data  ?? null,
+    totalInvestmentsFairValue: totalInvFVResult?.data ?? null,
     conceptsUsed: {
       navPerShare:     navResult?.conceptName     ?? null,
       niiPerShare:     niiResult?.conceptName     ?? null,
       dividendPerShare: divResult?.conceptName    ?? null,
       totalAssets:     assetsResult?.conceptName  ?? null,
+      totalInvestmentsFairValue: totalInvFVResult?.conceptName ?? null,
     },
   };
 }
@@ -153,6 +156,7 @@ export async function getLatestXBRLMetrics(cik) {
     nav:       metrics.navPerShare?.[0]?.value      ?? null,
     nii:       metrics.niiPerShare?.[0]?.value      ?? null,
     dividend:  metrics.dividendPerShare?.[0]?.value ?? null,
+    totalInvestmentsFairValue: metrics.totalInvestmentsFairValue?.[0]?.value ?? null,
     periodEnd: metrics.navPerShare?.[0]?.period     ?? null,
   };
 }

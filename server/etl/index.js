@@ -72,6 +72,13 @@ async function processBDC(bdc, priceData) {
       dividendCoverage: (raw.nii != null && raw.dividend != null && raw.dividend > 0)
         ? parseFloat((raw.nii / raw.dividend).toFixed(4))
         : null,
+      // Reliable, unambiguous total portfolio FV — confirmed via direct
+      // companyconcept API check to return one clean value per period
+      // (no dimensional segment pollution). Used as the denominator for
+      // markdown/realized-loss % in Step 3, replacing the old SOI-table
+      // column-sum approach which was silently summing the wrong column
+      // on real filings (see notes in constants.js).
+      totalInvestmentsFairValue: raw.totalInvestmentsFairValue,
       dataSource: 'xbrl',
       rawXbrl: raw,
     };
@@ -95,7 +102,9 @@ async function processBDC(bdc, priceData) {
   console.log(`[${ticker}] Parsing Schedule of Investments...`);
   try {
     const html = await fetchFilingDocument(latestFiling.docUrl);
-    const { portfolioMetrics: parsed, sectorExposure, notes } = parseScheduleOfInvestments(html, ticker);
+    const { portfolioMetrics: parsed, sectorExposure, notes } = parseScheduleOfInvestments(
+      html, ticker, xbrlMetrics.totalInvestmentsFairValue,
+    );
 
     if (Object.keys(parsed).length > 0) {
       // parseScheduleOfInvestments returns snake_case keys matching the DB
