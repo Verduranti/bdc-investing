@@ -65,12 +65,28 @@ async function processBDC(bdc, priceData) {
   let xbrlMetrics = {};
   try {
     const raw = await getLatestXBRLMetrics(cik);
+
+    // Sanity bound on per-share dollar figures. Found in production that
+    // TPVG's OWN filed XBRL tags a per-share dividend as "360" for some
+    // comparative periods (should be $3.60 or $0.36 — the filer's own
+    // scale/decimals attribute is inconsistent across their historical
+    // filings, confirmed directly against the SEC companyconcept API, so
+    // this isn't a bug in our parsing). No real BDC pays anywhere near
+    // $20/share in a single quarter, so treat anything past that as a
+    // filer-side tagging error rather than compute a coverage ratio from
+    // a distorted number — a wrong number here is worse than no number.
+    const MAX_PLAUSIBLE_PER_SHARE = 20;
+    const safeNii = (raw.nii != null && Math.abs(raw.nii) <= MAX_PLAUSIBLE_PER_SHARE) ? raw.nii : null;
+    const safeDividend = (raw.dividend != null && Math.abs(raw.dividend) <= MAX_PLAUSIBLE_PER_SHARE) ? raw.dividend : null;
+    if (raw.nii != null && safeNii == null) console.warn(`[${ticker}] XBRL NII per share ($${raw.nii}) exceeds plausible bound — treating as filer tagging error, dropped`);
+    if (raw.dividend != null && safeDividend == null) console.warn(`[${ticker}] XBRL dividend per share ($${raw.dividend}) exceeds plausible bound — treating as filer tagging error, dropped`);
+
     xbrlMetrics = {
-      niiPerShare:     raw.nii,
-      dividendPerShare: raw.dividend,
+      niiPerShare:     safeNii,
+      dividendPerShare: safeDividend,
       // Compute coverage if both available
-      dividendCoverage: (raw.nii != null && raw.dividend != null && raw.dividend > 0)
-        ? parseFloat((raw.nii / raw.dividend).toFixed(4))
+      dividendCoverage: (safeNii != null && safeDividend != null && safeDividend > 0)
+        ? parseFloat((safeNii / safeDividend).toFixed(4))
         : null,
       // Reliable, unambiguous total portfolio FV — confirmed via direct
       // companyconcept API check to return one clean value per period

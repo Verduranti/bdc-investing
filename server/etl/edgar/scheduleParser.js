@@ -258,6 +258,22 @@ export function parseScheduleOfInvestments(html, ticker, totalInvestmentsFairVal
   const collision = realizedMatch && markdownMatch &&
     realizedMatch[1].replace(/[,()]/g, '') === markdownMatch[1].replace(/[,()]/g, '');
 
+  // Sanity bound: a diversified BDC portfolio essentially never swings
+  // more than ~20% in realized losses or markdown in a single quarter —
+  // even a severe credit event quarter is typically low-to-mid single
+  // digits. Confirmed in production that when this bound is exceeded
+  // it's a parsing artifact, not a real number: LIEN's real markdown was
+  // -$1,426,900 against a real portfolio FV of ~$364M (a sane -0.39%),
+  // but the extractor's assumed "thousands" default scale (see
+  // detectDocumentScale) doesn't hold for every filer — some report in
+  // literal dollars, no "(in thousands)" caption at all — which turned
+  // that same $1,426,900 into a reported -392% by multiplying by 1000
+  // when it shouldn't have. Rather than try to perfectly solve unit
+  // detection for every filer's format (an open-ended problem), treat an
+  // implausible result as a parsing failure and drop it — reporting no
+  // data is safer than reporting a number nobody can act on.
+  const MAX_PLAUSIBLE_SWING_PCT = 20;
+
   if (realizedMatch && totalInvestmentsFairValueUSD && !collision) {
     const raw = realizedMatch[1];
     const isNegative = raw.includes('(') || raw.trim().startsWith('-');
@@ -266,8 +282,13 @@ export function parseScheduleOfInvestments(html, ticker, totalInvestmentsFairVal
       // Positive magnitude only — a net realized GAIN (positive figure)
       // means zero losses, not a negative "loss" number.
       const magnitude = isNegative ? Math.abs(absDollars) : 0;
-      trailingRealizedLossesPct = parseFloat(((magnitude / totalInvestmentsFairValueUSD) * 100).toFixed(3));
-      notes.push(`Realized ${isNegative ? 'loss' : 'gain'} extracted from text: $${absDollars.toLocaleString()} → ${trailingRealizedLossesPct}% of portfolio FV`);
+      const pct = parseFloat(((magnitude / totalInvestmentsFairValueUSD) * 100).toFixed(3));
+      if (Math.abs(pct) <= MAX_PLAUSIBLE_SWING_PCT) {
+        trailingRealizedLossesPct = pct;
+        notes.push(`Realized ${isNegative ? 'loss' : 'gain'} extracted from text: $${absDollars.toLocaleString()} → ${pct}% of portfolio FV`);
+      } else {
+        notes.push(`Realized-loss figure ($${absDollars.toLocaleString()}) implies an implausible ${pct}% of portfolio FV ($${totalInvestmentsFairValueUSD.toLocaleString()}) — likely a scale/parsing artifact, not written`);
+      }
     }
   }
 
@@ -279,8 +300,13 @@ export function parseScheduleOfInvestments(html, ticker, totalInvestmentsFairVal
       // Signed: negative = net markdown, positive = net markup — matches
       // ALERT_THRESHOLDS.markdownMaterial (-1.0) convention in constants.js.
       const signedDollars = isNegative ? -Math.abs(absDollars) : Math.abs(absDollars);
-      qoqMarkdownPct = parseFloat(((signedDollars / totalInvestmentsFairValueUSD) * 100).toFixed(3));
-      notes.push(`Unrealized ${isNegative ? 'depreciation' : 'appreciation'} extracted from text: $${absDollars.toLocaleString()} → ${qoqMarkdownPct}% of portfolio FV`);
+      const pct = parseFloat(((signedDollars / totalInvestmentsFairValueUSD) * 100).toFixed(3));
+      if (Math.abs(pct) <= MAX_PLAUSIBLE_SWING_PCT) {
+        qoqMarkdownPct = pct;
+        notes.push(`Unrealized ${isNegative ? 'depreciation' : 'appreciation'} extracted from text: $${absDollars.toLocaleString()} → ${pct}% of portfolio FV`);
+      } else {
+        notes.push(`Markdown figure ($${absDollars.toLocaleString()}) implies an implausible ${pct}% of portfolio FV ($${totalInvestmentsFairValueUSD.toLocaleString()}) — likely a scale/parsing artifact, not written`);
+      }
     }
   }
 
