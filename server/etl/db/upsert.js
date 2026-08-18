@@ -94,11 +94,22 @@ export async function upsertFilingPeriod(ticker, filing) {
  * Upsert portfolio metrics for a BDC + filing period.
  * Only writes fields that are non-null — preserves manually entered values.
  *
+ * `clearFields` is the escape hatch from that rule: an explicit list of
+ * column names to set to NULL. Needed because null-stripping makes the ETL
+ * unable to ever RETRACT a value it previously wrote — so when a run
+ * determines a stored number was sourced wrongly (e.g. a dividend that
+ * turned out to belong to a different filing period), a corrected re-run
+ * would otherwise leave the bad value, and any alert derived from it, in
+ * place permanently. Callers must pass column names, not camelCase keys,
+ * and should only clear fields they can positively show are unsourceable —
+ * never blanket-clear, or manually entered values get wiped.
+ *
  * @param {string} ticker
  * @param {number} filingPeriodId
  * @param {object} metrics
+ * @param {string[]} clearFields - column names to explicitly NULL out
  */
-export async function upsertPortfolioMetrics(ticker, filingPeriodId, metrics) {
+export async function upsertPortfolioMetrics(ticker, filingPeriodId, metrics, clearFields = []) {
   const bdc_id = await getBdcId(ticker);
 
   // Strip null/undefined fields so we don't overwrite good data with nulls
@@ -119,6 +130,9 @@ export async function upsertPortfolioMetrics(ticker, filingPeriodId, metrics) {
       raw_xbrl:                     metrics.rawXbrl                   ?? null,
     }).filter(([, v]) => v !== null)
   );
+
+  // Applied after the strip, so these survive it deliberately.
+  for (const column of clearFields) row[column] = null;
 
   check(
     await supabase

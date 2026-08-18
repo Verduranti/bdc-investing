@@ -26,16 +26,7 @@
  */
 
 import { getRecentFilings, fetchFilingDocument } from './submissions.js';
-import { EDGAR_USER_AGENT, EDGAR_RATE_LIMIT_MS } from '../constants.js';
-
-let _lastCall = 0;
-async function rateLimited(fn) {
-  const now = Date.now();
-  const wait = EDGAR_RATE_LIMIT_MS - (now - _lastCall);
-  if (wait > 0) await new Promise(r => setTimeout(r, wait));
-  _lastCall = Date.now();
-  return fn();
-}
+import { EDGAR_USER_AGENT } from '../constants.js';
 
 /** Pull a text node from XML string by tag name. */
 function xmlText(xml, tag) {

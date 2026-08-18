@@ -11,16 +11,8 @@
  * API: https://data.sec.gov/api/xbrl/companyfacts/CIK{padded}.json
  */
 
-import { EDGAR_BASE, EDGAR_USER_AGENT, EDGAR_RATE_LIMIT_MS, XBRL_CONCEPTS } from '../constants.js';
-
-let _lastCall = 0;
-async function rateLimited(fn) {
-  const now = Date.now();
-  const wait = EDGAR_RATE_LIMIT_MS - (now - _lastCall);
-  if (wait > 0) await new Promise(r => setTimeout(r, wait));
-  _lastCall = Date.now();
-  return fn();
-}
+import { EDGAR_BASE, EDGAR_USER_AGENT, XBRL_CONCEPTS } from '../constants.js';
+import { rateLimited } from './rateLimit.js';
 
 /**
  * Fetch the full companyfacts blob for a CIK.
@@ -143,20 +135,76 @@ export async function fetchXBRLMetrics(cik) {
   };
 }
 
+/** Pick the fact tagged for `periodEnd`, or null. Unscoped = newest fact. */
+function factForPeriod(series, periodEnd) {
+  if (!series?.length) return null;
+  if (periodEnd == null) return series[0];
+  return series.find(f => f.period === periodEnd) ?? null;
+}
+
 /**
- * Get the most recent NAV per share and NII per share for a BDC.
- * Convenience wrapper used by the scoring engine.
+ * Get the XBRL facts belonging to ONE specific filing period.
+ *
+ * `periodEnd` is the report date of the filing being processed (e.g.
+ * '2026-06-30'). Scoping to it matters because companyfacts is a
+ * per-concept archive, not a per-filing snapshot: each concept's history
+ * ends whenever that filer last tagged it, and those end dates differ
+ * wildly between concepts for the same company. Taking `[0]` from each
+ * series independently therefore silently mixes periods.
+ *
+ * Confirmed in production: CGBD's newest CommonStockDividendsPerShareDeclared
+ * fact is Q1 2024 ($0.40) while its NAV is current, so the Q2 2026 row was
+ * assembled from a two-year-old dividend and a current-quarter NII and
+ * reported 88% dividend coverage — against an actual $0.35 dividend that
+ * NII covered exactly. OCSL failed the same way through a single
+ * instant-dated fact (2025-11-10, $0.40) carried into a quarter where it
+ * actually paid $0.30 + $0.04 supplemental. Only 19 of the 46 BDCs in the
+ * universe tag a dividend for their own latest period at all; the rest are
+ * stale by 1-4 years or absent entirely. A flow fact that isn't tagged for
+ * THIS period is not evidence about this period — return null and let the
+ * metric stay empty, same principle as the NII/EPS note in constants.js.
+ *
+ * NAV is the deliberate exception. valuation_snapshots carries the last
+ * reported NAV forward between filings by design (see schema.sql), and
+ * EDGAR's companyfacts can lag a freshly filed 10-Q: ARCC's Q2 2026 10-Q
+ * (report date 2026-06-30, filed 2026-07-29) still had no Q2 facts of any
+ * kind, so period-scoping NAV would drop the largest BDC in the universe
+ * out of the price/discount pipeline over a transient upstream lag. NAV
+ * comes back with its own `navPeriod` so callers can see how stale it is.
  *
  * @param {string} cik
- * @returns {Promise<{nav: number|null, nii: number|null, dividend: number|null, periodEnd: string|null}>}
+ * @param {string|null} periodEnd - filing report date, 'YYYY-MM-DD'
+ * @returns {Promise<{nav, navPeriod, nii, dividend, totalInvestmentsFairValue,
+ *                    periodEnd, outOfPeriod: Record<string,string>}>}
  */
-export async function getLatestXBRLMetrics(cik) {
+export async function getLatestXBRLMetrics(cik, periodEnd = null) {
   const metrics = await fetchXBRLMetrics(cik);
+
+  const nii = factForPeriod(metrics.niiPerShare, periodEnd);
+  const div = factForPeriod(metrics.dividendPerShare, periodEnd);
+  const fv  = factForPeriod(metrics.totalInvestmentsFairValue, periodEnd);
+  const nav = metrics.navPerShare?.[0] ?? null;
+
+  // Concepts the filer HAS tagged, but only for some other period. Reported
+  // rather than silently dropped so a run log says why a metric came back
+  // empty — "no dividend tagged for 2026-06-30, newest is 2024-03-31" is
+  // actionable; a bare null looks indistinguishable from a fetch failure.
+  const outOfPeriod = {};
+  for (const [key, series, picked] of [
+    ['nii',                       metrics.niiPerShare,               nii],
+    ['dividend',                  metrics.dividendPerShare,          div],
+    ['totalInvestmentsFairValue', metrics.totalInvestmentsFairValue, fv],
+  ]) {
+    if (!picked && series?.length) outOfPeriod[key] = series[0].period;
+  }
+
   return {
-    nav:       metrics.navPerShare?.[0]?.value      ?? null,
-    nii:       metrics.niiPerShare?.[0]?.value      ?? null,
-    dividend:  metrics.dividendPerShare?.[0]?.value ?? null,
-    totalInvestmentsFairValue: metrics.totalInvestmentsFairValue?.[0]?.value ?? null,
-    periodEnd: metrics.navPerShare?.[0]?.period     ?? null,
+    nav:       nav?.value  ?? null,
+    navPeriod: nav?.period ?? null,
+    nii:       nii?.value  ?? null,
+    dividend:  div?.value  ?? null,
+    totalInvestmentsFairValue: fv?.value ?? null,
+    periodEnd: periodEnd ?? nav?.period ?? null,
+    outOfPeriod,
   };
 }

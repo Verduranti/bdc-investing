@@ -64,7 +64,10 @@ async function processBDC(bdc, priceData) {
   console.log(`[${ticker}] Fetching XBRL metrics...`);
   let xbrlMetrics = {};
   try {
-    const raw = await getLatestXBRLMetrics(cik);
+    // Scoped to THIS filing's period — companyfacts series for different
+    // concepts end at different dates, so an unscoped fetch mixes periods
+    // (see getLatestXBRLMetrics).
+    const raw = await getLatestXBRLMetrics(cik, latestFiling.reportDate);
 
     // Sanity bound on per-share dollar figures. Found in production that
     // TPVG's OWN filed XBRL tags a per-share dividend as "360" for some
@@ -95,13 +98,24 @@ async function processBDC(bdc, priceData) {
       // column-sum approach which was silently summing the wrong column
       // on real filings (see notes in constants.js).
       totalInvestmentsFairValue: raw.totalInvestmentsFairValue,
+      // Set when the filer tags a dividend, but only for another period —
+      // the signal that a previously stored dividend needs retracting.
+      outOfPeriodDividend: raw.outOfPeriod.dividend ?? null,
       dataSource: 'xbrl',
       rawXbrl: raw,
     };
     stepResults.xbrl = { nav: raw.nav, nii: raw.nii, dividend: raw.dividend };
+    stepResults.xbrlOutOfPeriod = raw.outOfPeriod;
 
     // Use XBRL NAV if available — this is the primary NAV source
     if (raw.nav != null) xbrlMetrics.latestNav = raw.nav;
+
+    for (const [concept, newest] of Object.entries(raw.outOfPeriod)) {
+      console.warn(`[${ticker}] XBRL ${concept}: nothing tagged for ${latestFiling.reportDate} (newest is ${newest}) — left empty rather than carried forward`);
+    }
+    if (raw.navPeriod && raw.navPeriod !== latestFiling.reportDate) {
+      console.warn(`[${ticker}] XBRL NAV is from ${raw.navPeriod}, not ${latestFiling.reportDate} — carried forward by design`);
+    }
 
     console.log(`[${ticker}] XBRL: NAV=${raw.nav} NII=${raw.nii} Div=${raw.dividend}`);
   } catch (err) {
@@ -109,8 +123,19 @@ async function processBDC(bdc, priceData) {
     stepResults.xbrlError = err.message;
   }
 
-  // Upsert what we have from XBRL
-  await upsertPortfolioMetrics(ticker, filingPeriodId, xbrlMetrics);
+  // Upsert what we have from XBRL.
+  //
+  // If the filer tags a dividend but not for this period, any dividend and
+  // coverage already stored against this row came from the pre-fix
+  // carry-forward and is wrong — retract it explicitly, since the upsert
+  // strips nulls and would otherwise preserve it forever along with the
+  // false "uncovered dividend" alert it feeds. Scoped to the case where an
+  // out-of-period fact actually exists so manual entries and filers with no
+  // dividend concept at all are left untouched.
+  const staleDividendFields = xbrlMetrics.outOfPeriodDividend
+    ? ['dividend_per_share', 'dividend_coverage']
+    : [];
+  await upsertPortfolioMetrics(ticker, filingPeriodId, xbrlMetrics, staleDividendFields);
 
   // ── Step 3: Schedule of Investments parsing ───────────────────────
   // Only parse if the filing hasn't been processed yet.

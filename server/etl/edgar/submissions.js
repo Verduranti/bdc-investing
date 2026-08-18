@@ -8,17 +8,8 @@
  * Rate limit: 10 req/sec — enforced by the shared rateLimited() wrapper.
  */
 
-import { EDGAR_BASE, EDGAR_USER_AGENT, EDGAR_RATE_LIMIT_MS } from '../constants.js';
-
-// Simple rate-limiter: ensures at least EDGAR_RATE_LIMIT_MS between calls.
-let _lastCall = 0;
-async function rateLimited(fn) {
-  const now = Date.now();
-  const wait = EDGAR_RATE_LIMIT_MS - (now - _lastCall);
-  if (wait > 0) await new Promise(r => setTimeout(r, wait));
-  _lastCall = Date.now();
-  return fn();
-}
+import { EDGAR_BASE, EDGAR_USER_AGENT } from '../constants.js';
+import { rateLimited } from './rateLimit.js';
 
 async function edgarGet(url) {
   return rateLimited(async () => {

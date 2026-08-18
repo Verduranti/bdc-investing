@@ -329,10 +329,39 @@ export function parseScheduleOfInvestments(html, ticker, totalInvestmentsFairVal
   // income per share, basic and diluted  $ 0.25  $ 0.25" — no "of"
   // connector — so, like the realized/markdown matches above, this can't
   // require "of" between the label and the figure.
+  //
+  // A Statement of Operations routinely carries SEVERAL "...net investment
+  // income per share..." rows, and filers commonly print a non-GAAP variant
+  // (pre-tax, adjusted, core, distributable) immediately ABOVE the GAAP one
+  // — so first-match-wins silently returns the wrong figure. Real example,
+  // CSWC's quarter ended 2026-06-30: "Pre-tax net investment income per
+  // share - basic $0.57 / Net investment income per share – basic $0.58".
+  // The old single .match() took $0.57 and understated dividend coverage by
+  // ~2 points. Walk every match instead and take the first unqualified one.
+  const NII_RE = /net\s+investment\s+income(?:\s*\(loss\))?[^0-9$()]{0,80}per\s+(?:common\s+)?share[^0-9$()]{0,40}([\(\$]{0,2}-?[\d,]+\.\d+\)?)/gi;
+
+  // The qualifier sits immediately before the label ("Pre-tax net investment
+  // income per share"), so this is tested against the text ENDING at the
+  // match start, anchored with $ — that anchor is what keeps an incidental
+  // "...core portfolio. Net investment income per share $0.30" from being
+  // thrown out. Trailing punctuation is allowed so "Adjusted (non-GAAP)"
+  // still trips it. Keep this list to non-GAAP *measure* names: words like
+  // "total" or "consolidated" still describe the GAAP figure and must not
+  // disqualify it.
+  const NII_QUALIFIER_RE = /(pre[-\s]?tax|after[-\s]?tax|adjusted|core|supplemental|distributable|non[-\s]?gaap)[\s)\-–—]*$/i;
+
   let niiPerShare = null;
-  const niiMatch = bodyText.match(
-    /net\s+investment\s+income(?:\s*\(loss\))?[^0-9$()]{0,80}per\s+(?:common\s+)?share[^0-9$()]{0,40}([\(\$]{0,2}-?[\d,]+\.\d+\)?)/i
-  );
+  let niiMatch = null;
+  for (const candidate of bodyText.matchAll(NII_RE)) {
+    const preceding = bodyText.slice(Math.max(0, candidate.index - 40), candidate.index);
+    if (NII_QUALIFIER_RE.test(preceding)) {
+      notes.push(`Skipped non-GAAP NII/share variant: "…${preceding.trim().split(/\s+/).slice(-2).join(' ')} net investment income per share" = ${candidate[1]}`);
+      continue;
+    }
+    niiMatch = candidate;
+    break;
+  }
+
   if (niiMatch) {
     const token = niiMatch[1].trim();
     niiPerShare = parseFloat(token.replace(/[$,()]/g, ''));
