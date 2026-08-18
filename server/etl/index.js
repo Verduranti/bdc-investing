@@ -101,8 +101,12 @@ async function processBDC(bdc, priceData) {
       // Set when the filer tags a dividend, but only for another period —
       // the signal that a previously stored dividend needs retracting.
       outOfPeriodDividend: raw.outOfPeriod.dividend ?? null,
+      // Full quarterly NAV series for the valuation-snapshot step-join.
+      navHistory: raw.navHistory ?? [],
       dataSource: 'xbrl',
-      rawXbrl: raw,
+      // navHistory is ~90-115 facts per BDC; it's pipeline input, not a
+      // debugging artifact, so keep it out of the stored blob.
+      rawXbrl: Object.fromEntries(Object.entries(raw).filter(([k]) => k !== 'navHistory')),
     };
     stepResults.xbrl = { nav: raw.nav, nii: raw.nii, dividend: raw.dividend };
     stepResults.xbrlOutOfPeriod = raw.outOfPeriod;
@@ -216,15 +220,19 @@ async function processBDC(bdc, priceData) {
   }
 
   // ── Step 5: Price history ─────────────────────────────────────────
+  // Pass the full quarterly NAV series, not just the current value — each
+  // snapshot gets the NAV that had actually been published by that date
+  // (see upsertValuationSnapshots).
   const prices = priceData[ticker] ?? [];
   const latestNav = xbrlMetrics.latestNav ?? null;
+  const navHistory = xbrlMetrics.navHistory ?? [];
 
-  if (prices.length > 0 && latestNav != null) {
-    await upsertValuationSnapshots(ticker, latestNav, prices);
+  if (prices.length > 0 && navHistory.length > 0) {
+    await upsertValuationSnapshots(ticker, navHistory, prices);
     stepResults.priceSnapshots = prices.length;
-    console.log(`[${ticker}] Price snapshots: ${prices.length} (latest NAV: ${latestNav})`);
+    console.log(`[${ticker}] Price snapshots: ${prices.length} (NAV series: ${navHistory.length} quarters, latest ${latestNav})`);
   } else {
-    console.warn(`[${ticker}] Skipping snapshots: prices=${prices.length} nav=${latestNav}`);
+    console.warn(`[${ticker}] Skipping snapshots: prices=${prices.length} navQuarters=${navHistory.length}`);
   }
 
   // ── Step 6: Scoring ───────────────────────────────────────────────

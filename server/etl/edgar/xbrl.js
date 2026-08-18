@@ -71,7 +71,7 @@ function extractQuarterly(facts, namespace, conceptNames) {
         const durationDays = e.start
           ? (new Date(e.end) - new Date(e.start)) / 86400000
           : 0;
-        const candidate = { period: e.end, value: e.val, filed: e.filed, form: e.form, durationDays };
+        const candidate = { period: e.end, value: e.val, filed: e.filed, firstFiled: e.filed, form: e.form, durationDays };
 
         const prior = seen.get(e.end);
         if (!prior) {
@@ -79,17 +79,29 @@ function extractQuarterly(facts, namespace, conceptNames) {
           continue;
         }
 
+        // `filed` on the winning fact is the LAST filing to mention this
+        // period, because every 10-Q re-reports prior periods as
+        // comparatives — ARCC's 2025-03-31 NAV carries filed=2026-04-28
+        // from the following year's Q1. That's the right value (a restated
+        // figure supersedes the original) but the wrong date for asking
+        // "when did the market learn this?". Track the earliest filing that
+        // carried the period separately; valuation snapshots need it to
+        // avoid backdating NAV that nobody had seen yet.
+        const firstFiled = prior.firstFiled < e.filed ? prior.firstFiled : e.filed;
+
         const priorIsQuarterly = prior.durationDays <= 100;
         const candidateIsQuarterly = durationDays <= 100;
         if (candidateIsQuarterly && !priorIsQuarterly) {
-          seen.set(e.end, candidate);
+          seen.set(e.end, { ...candidate, firstFiled });
         } else if (candidateIsQuarterly === priorIsQuarterly && e.filed > prior.filed) {
-          seen.set(e.end, candidate);
+          seen.set(e.end, { ...candidate, firstFiled });
+        } else {
+          prior.firstFiled = firstFiled;
         }
       }
 
       const result = [...seen.values()]
-        .map(({ period, value, filed, form }) => ({ period, value, filed, form }))
+        .map(({ period, value, filed, firstFiled, form }) => ({ period, value, filed, firstFiled, form }))
         .sort((a, b) => b.period.localeCompare(a.period));
       if (result.length > 0) return { conceptName: name, unit, data: result };
     }
@@ -174,8 +186,9 @@ function factForPeriod(series, periodEnd) {
  *
  * @param {string} cik
  * @param {string|null} periodEnd - filing report date, 'YYYY-MM-DD'
- * @returns {Promise<{nav, navPeriod, nii, dividend, totalInvestmentsFairValue,
- *                    periodEnd, outOfPeriod: Record<string,string>}>}
+ * @returns {Promise<{nav, navPeriod, navHistory, nii, dividend,
+ *                    totalInvestmentsFairValue, periodEnd,
+ *                    outOfPeriod: Record<string,string>}>}
  */
 export async function getLatestXBRLMetrics(cik, periodEnd = null) {
   const metrics = await fetchXBRLMetrics(cik);
@@ -201,6 +214,11 @@ export async function getLatestXBRLMetrics(cik, periodEnd = null) {
   return {
     nav:       nav?.value  ?? null,
     navPeriod: nav?.period ?? null,
+    // Full quarterly NAV series, carried out so valuation snapshots can be
+    // stamped with the NAV that actually applied on each historical date
+    // rather than today's. Comes free — it's already in the companyfacts
+    // blob we just downloaded, so exposing it costs no extra request.
+    navHistory: metrics.navPerShare ?? [],
     nii:       nii?.value  ?? null,
     dividend:  div?.value  ?? null,
     totalInvestmentsFairValue: fv?.value ?? null,

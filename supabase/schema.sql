@@ -97,8 +97,14 @@ create table if not exists valuation_snapshots (
   id              bigserial primary key,
   bdc_id          integer not null references bdcs(id) on delete cascade,
   snapshot_date   date not null,
-  price           numeric(10,4),
-  nav             numeric(10,4),    -- latest reported NAV, carried forward
+  price           numeric(10,4),    -- RAW traded close, not dividend-adjusted
+  price_adj       numeric(10,4),    -- dividend-adjusted close; restated on every
+                                    -- ex-div date, so total-return use only —
+                                    -- never for discount-to-NAV
+  nav             numeric(10,4),    -- NAV as KNOWN on snapshot_date: from the most
+                                    -- recent filing filed on or before it, not the
+                                    -- quarter the date falls in (that's lookahead)
+  nav_as_of       date,             -- period_end of the filing that supplied nav
   discount_pct    numeric(8,4),     -- (price - nav) / nav * 100
   volume          bigint,
   price_source    text,             -- 'yahoo' | 'polygon' | 'manual'

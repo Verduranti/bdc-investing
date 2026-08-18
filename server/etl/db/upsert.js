@@ -174,25 +174,100 @@ export async function upsertSectorExposure(ticker, filingPeriodId, exposure) {
 // ── Valuation Snapshots ────────────────────────────────────────────────────
 
 /**
- * Bulk upsert daily price snapshots.
- * Joins with the latest NAV from portfolio_metrics to compute discount.
+ * Build the "NAV an investor could actually have known" timeline.
+ *
+ * Two defensible definitions of a historical discount exist, and they are
+ * not the same number:
+ *
+ *   (a) the NAV of the quarter the date falls in — economically tidy, but
+ *       nobody knew it at the time; a 10-Q lands 4-8 weeks after quarter
+ *       end. Using it backdates information and makes any z-score or
+ *       backtest built on this table look better than reality.
+ *   (b) the NAV from the most recent filing FILED on or before that date —
+ *       what the market could see. Discount to NAV is a market-perception
+ *       measure, so this is the honest one, and it matches what
+ *       valuation_snapshots already does for TODAY ("latest reported NAV,
+ *       carried forward" in schema.sql).
+ *
+ * We use (b). Entries are walked in filing order carrying the newest
+ * period seen so far, because a single 10-Q reports several NAV facts at
+ * once (current quarter plus comparatives) and a late-filed amendment can
+ * restate an old period without superseding a newer one.
+ *
+ * @param {Array<{period, value, filed}>} navHistory
+ * @returns {Array<{filed: string, period: string, value: number}>} ascending by filed
+ */
+function buildNavTimeline(navHistory) {
+  // firstFiled, not filed — see the note in xbrl.js extractQuarterly. `filed`
+  // is the last filing to mention the period (comparatives), which would
+  // delay a NAV by up to a year and mis-date the whole series.
+  const filings = (navHistory ?? [])
+    .map(n => ({ ...n, filed: n.firstFiled ?? n.filed }))
+    .filter(n => n.filed && n.period && n.value != null)
+    .sort((a, b) => a.filed.localeCompare(b.filed) || a.period.localeCompare(b.period));
+
+  const timeline = [];
+  let period = null, value = null;
+  for (const n of filings) {
+    if (period === null || n.period > period) { period = n.period; value = n.value; }
+    timeline.push({ filed: n.filed, period, value });
+  }
+  return timeline;
+}
+
+/**
+ * Write daily price/NAV/discount snapshots for one BDC.
+ *
+ * `navHistory` is the full quarterly NAV series (from getLatestXBRLMetrics),
+ * NOT a single current value. It used to be the latter: the current NAV was
+ * stamped onto every row across the whole 3-year window and discount_pct
+ * derived from it, so ARCC carried exactly one distinct NAV value across 776
+ * trading days and every historical discount answered "what would this have
+ * been if NAV had always been today's?". Each run then rewrote the entire
+ * window with the newest NAV, so the answer changed every quarter.
+ *
+ * Rewriting the full window is still fine — and is why there's no
+ * skip-existing logic here. Both inputs are now stable: raw closes don't get
+ * restated, and NAV-as-known-then can't change retroactively. Re-running
+ * converges on the same rows instead of drifting.
  *
  * @param {string} ticker
- * @param {number} latestNav - most recently reported NAV per share
- * @param {Array<{date, close, volume}>} priceHistory
+ * @param {Array<{period, value, filed}>} navHistory
+ * @param {Array<{date, close, adjClose, volume}>} priceHistory
  */
-export async function upsertValuationSnapshots(ticker, latestNav, priceHistory) {
+export async function upsertValuationSnapshots(ticker, navHistory, priceHistory) {
   const bdc_id = await getBdcId(ticker);
 
-  const rows = priceHistory.map(p => ({
-    bdc_id,
-    snapshot_date: p.date,
-    price:         p.close,
-    nav:           latestNav,
-    discount_pct:  latestNav ? parseFloat(((p.close - latestNav) / latestNav * 100).toFixed(4)) : null,
-    volume:        p.volume,
-    price_source:  'yahoo',
-  }));
+  const timeline = buildNavTimeline(navHistory);
+  // Pointer walk needs both sides ascending; don't assume the caller's order.
+  const prices = [...priceHistory].sort((a, b) => a.date.localeCompare(b.date));
+
+  let idx = -1;
+  let unpriced = 0;
+  const rows = prices.map(p => {
+    while (idx + 1 < timeline.length && timeline[idx + 1].filed <= p.date) idx++;
+    const known = idx >= 0 ? timeline[idx] : null;
+    const nav = known?.value ?? null;
+    // Dates before this BDC's first available filing get a null NAV rather
+    // than a borrowed one — no NAV had been published yet, so no discount
+    // existed to report.
+    if (nav == null) unpriced++;
+    return {
+      bdc_id,
+      snapshot_date: p.date,
+      price:         p.close,
+      price_adj:     p.adjClose ?? null,
+      nav,
+      nav_as_of:     known?.period ?? null,
+      discount_pct:  nav ? parseFloat(((p.close - nav) / nav * 100).toFixed(4)) : null,
+      volume:        p.volume,
+      price_source:  'yahoo',
+    };
+  });
+
+  if (unpriced > 0) {
+    console.warn(`[${ticker}] ${unpriced} snapshot(s) predate the first published NAV — discount left null`);
+  }
 
   // Batch in chunks of 500 to avoid request size limits
   for (let i = 0; i < rows.length; i += 500) {

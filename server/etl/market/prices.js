@@ -25,9 +25,26 @@ const YF_HEADERS = {
 /**
  * Fetch historical daily closes for a single ticker via Yahoo Finance chart API.
  *
+ * Returns BOTH series, because they answer different questions and are not
+ * interchangeable:
+ *
+ *   close    - the raw traded price. This is what discount-to-NAV must be
+ *              measured against, and it is stable: a past day's close does
+ *              not change.
+ *   adjClose - back-adjusted for every dividend since. Correct for
+ *              total-return work, wrong for discount-to-NAV, and RESTATED
+ *              on every ex-dividend date.
+ *
+ * This used to return only adjClose (under the name `close`), which broke
+ * both properties at once. BDCs yield 8-17%, so three years of adjustment
+ * is enormous — OXSQ closed at $3.06 on 2023-08-21 but its adjusted close
+ * reads $1.71, a 44% gap (PSEC 37%, ARCC 25%, MAIN 21%). And because the
+ * adjustment factor moves every month or quarter, the stored "history"
+ * shifted underneath us on every run, which is the opposite of keeping one.
+ *
  * @param {string} ticker
  * @param {number} days - lookback in calendar days (default 365*3 = 3yr)
- * @returns {Promise<Array<{date: string, close: number, volume: number}>>}
+ * @returns {Promise<Array<{date: string, close: number, adjClose: number|null, volume: number}>>}
  */
 export async function fetchPriceHistory(ticker, days = 365 * 3) {
   const period1 = Math.floor((Date.now() - days * 86400 * 1000) / 1000);
@@ -43,16 +60,18 @@ export async function fetchPriceHistory(ticker, days = 365 * 3) {
     if (!result) throw new Error('No chart data in response');
 
     const timestamps = result.timestamp ?? [];
-    const closes    = result.indicators?.adjclose?.[0]?.adjclose
-                   ?? result.indicators?.quote?.[0]?.close
-                   ?? [];
+    // Raw close is the primary series and the one we filter on; adjusted is
+    // carried alongside it and may legitimately be missing.
+    const closes    = result.indicators?.quote?.[0]?.close ?? [];
+    const adjCloses = result.indicators?.adjclose?.[0]?.adjclose ?? [];
     const volumes   = result.indicators?.quote?.[0]?.volume ?? [];
 
     return timestamps
       .map((ts, i) => ({
-        date:   new Date(ts * 1000).toISOString().slice(0, 10),
-        close:  closes[i] != null ? parseFloat(closes[i].toFixed(4)) : null,
-        volume: volumes[i] ?? 0,
+        date:     new Date(ts * 1000).toISOString().slice(0, 10),
+        close:    closes[i]    != null ? parseFloat(closes[i].toFixed(4))    : null,
+        adjClose: adjCloses[i] != null ? parseFloat(adjCloses[i].toFixed(4)) : null,
+        volume:   volumes[i] ?? 0,
       }))
       .filter(r => r.close != null)
       .sort((a, b) => a.date.localeCompare(b.date));
