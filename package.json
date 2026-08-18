@@ -9,7 +9,10 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "etl": "node server/etl/index.js",
-    "etl:check": "node server/etl/healthcheck.js"
+    "etl:local": "node --env-file=.env server/etl/index.js",
+    "etl:check": "node server/etl/healthcheck.js",
+    "backfill": "node server/etl/backfill-valuations.js",
+    "backfill:local": "node --env-file=.env server/etl/backfill-valuations.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.50.0",
