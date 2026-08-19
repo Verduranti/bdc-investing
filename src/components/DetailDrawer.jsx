@@ -147,6 +147,14 @@ export default function DetailDrawer({ bdc, onClose }) {
 
   const scoreIncomplete = navTrust.dataCompleteness != null && navTrust.dataCompleteness < 1 && navTrust.score != null;
 
+  // Was hardcoded "12 Quarter History", which described the old quarterly mock
+  // series. The live series is daily and spans whatever the backfill covered,
+  // so state the actual range rather than a number that's no longer true.
+  const ph = valuation.priceHistory ?? [];
+  const historyLabel = ph.length >= 2
+    ? `${ph[0].date.slice(0, 7)} → ${ph[ph.length - 1].date.slice(0, 7)} (${ph.length} pts)`
+    : '';
+
   return (
     <div className="flex flex-col h-full bg-slate-900 border-l border-slate-700/60">
       {/* Header */}
@@ -179,8 +187,11 @@ export default function DetailDrawer({ bdc, onClose }) {
             <div className="text-xs text-slate-500 mb-1 flex items-center gap-1.5">
               NAV Trust Score
               {scoreIncomplete && (
-                <span title="Partial score — some asset-quality data still missing" className="px-1 py-0 rounded bg-yellow-900/40 text-yellow-400 text-[10px] font-semibold">
-                  PARTIAL
+                <span
+                  title={`Based on ${navTrust.componentsAvailable}/${navTrust.componentsTotal} components — ${Math.round((navTrust.weightCovered ?? 0) * 100)}% of model weight. See breakdown below.`}
+                  className="px-1 py-0 rounded bg-yellow-900/40 text-yellow-400 text-[10px] font-semibold"
+                >
+                  {navTrust.componentsAvailable}/{navTrust.componentsTotal}
                 </span>
               )}
             </div>
@@ -199,7 +210,9 @@ export default function DetailDrawer({ bdc, onClose }) {
         {/* Price vs NAV mini-chart */}
         <div>
           <div className="flex items-center justify-between mb-2">
-            <span className="text-xs font-semibold text-slate-300">Price vs NAV — 12 Quarter History</span>
+            <span className="text-xs font-semibold text-slate-300">
+              Price vs NAV{historyLabel && ` — ${historyLabel}`}
+            </span>
             <div className="flex items-center gap-3 text-xs text-slate-500">
               <span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-indigo-400 inline-block rounded" /> NAV</span>
               <span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-emerald-400 inline-block rounded" /> Price</span>
@@ -239,13 +252,38 @@ export default function DetailDrawer({ bdc, onClose }) {
               <>
                 {navTrust.dataCompleteness < 1 && (
                   <div className="text-xs text-yellow-500/90 pb-2 mb-1 border-b border-slate-700/30">
-                    Partial score — based on {navTrust.components.length} of 6 components. Missing components aren't scored as "good," they're simply excluded.
+                    Partial score — {navTrust.componentsAvailable} of {navTrust.componentsTotal} components,
+                    covering {Math.round((navTrust.weightCovered ?? 0) * 100)}% of model weight.
+                    Missing components aren't scored as "good," they're simply excluded and the
+                    remaining weights renormalized.
                   </div>
                 )}
                 {navTrust.components.map(c => (
                   <ScoreComponentBar key={c.key} component={c} />
                 ))}
               </>
+            )}
+
+            {/* Name the components that had no data, and why. A score built on
+                one input should never look like a score built on six. */}
+            {navTrust.missingComponents?.length > 0 && (
+              <div className="mt-3 pt-2 border-t border-slate-700/40">
+                <div className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1.5">
+                  Not scored — no data ({navTrust.missingComponents.length})
+                </div>
+                {navTrust.missingComponents.map(m => (
+                  <div key={m.key} className="flex items-baseline justify-between gap-2 py-0.5">
+                    <span className="text-xs text-slate-500 line-through decoration-slate-700">{m.label}</span>
+                    <span className="text-[10px] font-mono text-slate-600 whitespace-nowrap">
+                      {(m.weight * 100).toFixed(0)}% wt
+                    </span>
+                  </div>
+                ))}
+                <div className="text-[10px] text-slate-600 mt-1.5 leading-snug">
+                  {navTrust.missingComponents[0].reason}
+                  {navTrust.missingComponents.length > 1 && ' (and others)'}
+                </div>
+              </div>
             )}
           </div>
         </div>

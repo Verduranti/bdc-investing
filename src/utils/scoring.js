@@ -248,32 +248,60 @@ export function computeNAVTrustScore(bdc) {
   // report dataCompleteness so the UI can flag a partial score honestly.
   const hasSectorData = sectorExposure?.software != null && sectorExposure?.top10HoldingsPct != null;
 
-  const allComponents = [
-    assetQuality.nonAccrualFVPct != null
-      ? scoreNonAccrual(assetQuality.nonAccrualFVPct)
-      : null,
-    (assetQuality.pikIncomePct != null && assetQuality.pikIncomePriorQuarterPct != null)
-      ? scorePIK(assetQuality.pikIncomePct, assetQuality.pikIncomePriorQuarterPct)
-      : null,
-    assetQuality.qoqMarkdownPct != null
-      ? scoreMarkdown(assetQuality.qoqMarkdownPct)
-      : null,
-    hasSectorData
-      ? scoreSectorConcentration(sectorExposure)
-      : null,
-    assetQuality.trailingRealizedLossesPct != null
-      ? scoreRealizedLosses(assetQuality.trailingRealizedLossesPct)
-      : null,
-    assetQuality.dividendCoverage != null
-      ? scoreDividendCoverage(assetQuality.dividendCoverage)
-      : null,
+  // Each slot carries its own identity and weight whether or not it scores, so
+  // a component that DIDN'T run can still be named in the UI. Knowing a score
+  // is partial is much less useful than knowing which inputs are missing —
+  // "no PIK prior quarter" is actionable, a bare asterisk isn't.
+  const SPECS = [
+    { key: 'nonAccrual',       label: 'Non-Accrual Exposure',      weight: 0.25,
+      missing: 'nonAccrualFVPct not extracted',
+      run: () => assetQuality.nonAccrualFVPct != null && scoreNonAccrual(assetQuality.nonAccrualFVPct) },
+    { key: 'pik',              label: 'PIK Income',                weight: 0.20,
+      missing: assetQuality.pikIncomePct == null
+        ? 'pikIncomePct not extracted'
+        : 'prior-quarter PIK not extracted (trend needs both quarters)',
+      run: () => assetQuality.pikIncomePct != null && assetQuality.pikIncomePriorQuarterPct != null
+        && scorePIK(assetQuality.pikIncomePct, assetQuality.pikIncomePriorQuarterPct) },
+    { key: 'markdown',         label: 'Portfolio Markdown Trend',  weight: 0.20,
+      missing: 'qoqMarkdownPct not extracted',
+      run: () => assetQuality.qoqMarkdownPct != null && scoreMarkdown(assetQuality.qoqMarkdownPct) },
+    { key: 'concentration',    label: 'Sector Concentration',      weight: 0.15,
+      missing: 'sector exposure not parsed from Schedule of Investments',
+      run: () => hasSectorData && scoreSectorConcentration(sectorExposure) },
+    { key: 'realizedLosses',   label: 'Trailing Realized Losses',  weight: 0.10,
+      missing: 'trailingRealizedLossesPct not extracted',
+      run: () => assetQuality.trailingRealizedLossesPct != null
+        && scoreRealizedLosses(assetQuality.trailingRealizedLossesPct) },
+    { key: 'dividendCoverage', label: 'Dividend / NII Coverage',   weight: 0.10,
+      missing: 'NII per share not extracted, so coverage is unknown',
+      run: () => assetQuality.dividendCoverage != null && scoreDividendCoverage(assetQuality.dividendCoverage) },
   ];
 
-  const components = allComponents.filter(Boolean);
-  const dataCompleteness = parseFloat((components.length / allComponents.length).toFixed(2));
+  const components = [];
+  const missingComponents = [];
+  for (const spec of SPECS) {
+    const scored = spec.run();
+    if (scored) components.push(scored);
+    else missingComponents.push({ key: spec.key, label: spec.label, weight: spec.weight, reason: spec.missing });
+  }
+
+  const dataCompleteness = parseFloat((components.length / SPECS.length).toFixed(2));
+  // Share of the model's WEIGHT that actually had data behind it. More honest
+  // than the plain count: missing non-accrual (0.25) guts the score far more
+  // than missing realized losses (0.10), but both cost the same 1/6 on count.
+  const weightCovered = parseFloat(
+    (components.reduce((s, c) => s + c.weight, 0) /
+     SPECS.reduce((s, c) => s + c.weight, 0)).toFixed(2)
+  );
+  const componentsAvailable = components.length;
+  const componentsTotal = SPECS.length;
 
   if (components.length === 0) {
-    return { score: null, grade: 'N/A', components: [], dataCompleteness: 0 };
+    return {
+      score: null, grade: 'N/A', components: [], missingComponents,
+      dataCompleteness: 0, weightCovered: 0,
+      componentsAvailable: 0, componentsTotal,
+    };
   }
 
   // Weighted sum (renormalized over available components only)
@@ -289,7 +317,10 @@ export function computeNAVTrustScore(bdc) {
   else if (score >= 35) grade = 'D';
   else grade = 'F';
 
-  return { score, grade, components, dataCompleteness };
+  return {
+    score, grade, components, missingComponents,
+    dataCompleteness, weightCovered, componentsAvailable, componentsTotal,
+  };
 }
 
 /**
@@ -300,16 +331,32 @@ export function computeValuationMetrics(bdc) {
   const { price, nav, priceHistory } = bdc.valuation;
   const discount = ((price - nav) / nav) * 100;
 
-  // 30-day change proxy: compare most recent vs 2 quarters ago in mock
-  const priceLen = priceHistory.length;
-  const price30dAgo = priceLen >= 2 ? priceHistory[priceLen - 2].value : price;
-  const nav30dAgo = priceLen >= 2 ? bdc.valuation.navHistory[priceLen - 2]?.value ?? nav : nav;
+  // Look back a real ~30 calendar days by DATE, not by a fixed number of array
+  // slots. This used to be `priceHistory[len - 2]`, which meant "one quarter
+  // ago" only because the mock series was quarterly. The live series is daily,
+  // so index len-2 is YESTERDAY — the "30d Δ" column read ~0.0% for every BDC
+  // and the discount-widening alert (threshold -5%) could never fire.
+  const navHistory = bdc.valuation.navHistory ?? [];
+  const idxNow = priceHistory.length - 1;
+  let idxThen = 0;
+  if (idxNow >= 1) {
+    const cutoff = new Date(priceHistory[idxNow].date);
+    cutoff.setDate(cutoff.getDate() - 30);
+    // Most recent point that is at least 30 days old; if the whole series is
+    // younger than that, fall back to the oldest point we have.
+    for (let i = idxNow - 1; i >= 0; i--) {
+      idxThen = i;
+      if (new Date(priceHistory[i].date) <= cutoff) break;
+    }
+  }
+  const price30dAgo = priceHistory[idxThen]?.value ?? price;
+  const nav30dAgo = navHistory[idxThen]?.value ?? nav;
   const discount30dAgo = ((price30dAgo - nav30dAgo) / nav30dAgo) * 100;
   const discountChange30d = discount - discount30dAgo;
 
   // Simplified z-score based on discount position relative to historical
   const discountValues = priceHistory.map((p, i) => {
-    const n = bdc.valuation.navHistory[i]?.value ?? nav;
+    const n = navHistory[i]?.value ?? nav;
     return ((p.value - n) / n) * 100;
   });
   const mean = discountValues.reduce((a, b) => a + b, 0) / discountValues.length;

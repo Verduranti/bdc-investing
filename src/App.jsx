@@ -71,7 +71,17 @@ export default function App() {
     const avgDiscount = discounts.length ? discounts.reduce((a, b) => a + b, 0) / discounts.length : 0;
     const biggestDiscount = discounts.length ? Math.min(...discounts) : 0;
     const biggestDiscountTicker = ENRICHED.find(b => b.computed.valuation.discount === biggestDiscount)?.ticker;
-    return { totalAlerts, highAlerts, avgDiscount, biggestDiscount, biggestDiscountTicker };
+
+    // How much of the NAV Trust model actually has data behind it, universe-wide.
+    // Every BDC is currently partial, so a per-row asterisk conveys nothing —
+    // this is the honest headline number for how much to trust the scores.
+    const covers = ENRICHED.map(b => b.computed.navTrust.weightCovered ?? 0);
+    const avgCoverage = covers.length ? covers.reduce((a, b) => a + b, 0) / covers.length : 0;
+    const fullyScored = ENRICHED.filter(b => (b.computed.navTrust.weightCovered ?? 0) >= 1).length;
+    const unscored = ENRICHED.filter(b => b.computed.navTrust.score == null).length;
+
+    return { totalAlerts, highAlerts, avgDiscount, biggestDiscount, biggestDiscountTicker,
+             avgCoverage, fullyScored, unscored };
   }, [ENRICHED]);
 
   const selectedBDC = useMemo(
@@ -120,7 +130,7 @@ export default function App() {
       <div className="max-w-screen-2xl mx-auto w-full px-4 sm:px-6 flex-1 flex flex-col gap-4 py-4">
 
         {/* ── Summary cards ────────────────────────────────────────────── */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
           <StatCard
             label="BDCs Live"
             value={ENRICHED.length}
@@ -143,6 +153,20 @@ export default function App() {
             value={stats.highAlerts}
             sub={`${stats.totalAlerts} total alerts`}
             color={stats.highAlerts > 0 ? 'text-red-400' : 'text-emerald-400'}
+          />
+          <StatCard
+            label="Data Coverage"
+            value={`${Math.round(stats.avgCoverage * 100)}%`}
+            sub={
+              stats.unscored > 0
+                ? `${stats.fullyScored} fully scored · ${stats.unscored} unscored`
+                : `${stats.fullyScored} of ${ENRICHED.length} fully scored`
+            }
+            color={
+              stats.avgCoverage >= 0.9 ? 'text-emerald-400' :
+              stats.avgCoverage >= 0.6 ? 'text-yellow-400' :
+              stats.avgCoverage >= 0.35 ? 'text-orange-400' : 'text-red-400'
+            }
           />
         </div>
 

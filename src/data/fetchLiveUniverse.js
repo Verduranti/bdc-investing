@@ -14,8 +14,53 @@
 import { supabase } from '../lib/supabaseClient';
 import { BDC_UNIVERSE as MOCK_UNIVERSE } from './bdcData';
 
+// Every consumer pairs these series positionally — computeValuationMetrics does
+// `navHistory[i]` against `priceHistory[i]`, and DetailDrawer charts them on one
+// axis. Filtering each series for nulls independently breaks that pairing: price
+// history reaches back to 2022 but nav is null until the first filing we have
+// XBRL for (2681 rows table-wide), so a null-dropped navHistory would be shorter
+// and silently shift a 2023 NAV onto a 2022 price. Build both from the same
+// rows — the ones where price AND nav are both present — so index i is the same
+// date in both, by construction.
+const pairedSnapshots = rows => rows.filter(r => r.price != null && r.nav != null);
+
 const seriesFromSnapshots = (rows, key) =>
-  rows.map(r => ({ date: r.snapshot_date, value: r[key] })).filter(p => p.value != null);
+  rows.map(r => ({ date: r.snapshot_date, value: r[key] }));
+
+// PostgREST caps every response at 1000 rows. valuation_snapshots holds ~3 years
+// of DAILY history for the whole universe (43k+ rows), so an unbounded select
+// silently returned only the OLDEST 1000 rows — a 5-week window in 2022, where
+// nav is still null for most BDCs because their XBRL NAV history doesn't reach
+// back that far. Every BDC then failed the `latestSnapshot.nav` gate below,
+// fell back to its mock record, and got filtered out of the UI entirely.
+// The cap is server-side: .limit(5000) and .range(0, 4999) are both clamped to
+// 1000, so the only way to read the full series is to page through it.
+const PAGE = 1000;
+
+async function fetchAllSnapshots() {
+  const { count, error: countErr } = await supabase
+    .from('valuation_snapshots')
+    .select('*', { count: 'exact', head: true });
+  if (countErr) throw countErr;
+  if (!count) return [];
+
+  const pages = await Promise.all(
+    Array.from({ length: Math.ceil(count / PAGE) }, (_, i) =>
+      supabase
+        .from('valuation_snapshots')
+        .select('bdc_id, snapshot_date, price, nav')
+        // Ordering must be total, not just by date: rows tie on snapshot_date
+        // (one per BDC per day) and a non-deterministic tiebreak lets the same
+        // row appear in two pages while another appears in none.
+        .order('snapshot_date', { ascending: true })
+        .order('bdc_id', { ascending: true })
+        .range(i * PAGE, i * PAGE + PAGE - 1)
+    )
+  );
+  const bad = pages.find(p => p.error);
+  if (bad) throw bad.error;
+  return pages.flatMap(p => p.data ?? []);
+}
 
 /**
  * Fetch and reshape the live BDC universe from Supabase.
@@ -53,10 +98,7 @@ export async function fetchLiveUniverse() {
       latestFilingPeriodIds.length
         ? supabase.from('sector_exposure').select('*').in('filing_period_id', latestFilingPeriodIds)
         : Promise.resolve({ data: [], error: null }),
-      supabase
-        .from('valuation_snapshots')
-        .select('bdc_id, snapshot_date, price, nav')
-        .order('snapshot_date', { ascending: true }),
+      fetchAllSnapshots().then(data => ({ data, error: null })),
       supabase
         .from('insider_activity')
         .select('*')
@@ -88,7 +130,7 @@ export async function fetchLiveUniverse() {
       const filing = latestFilingByBdc[bdc.id];
       const pm = filing ? pmByFilingId[filing.id] : null;
       const se = filing ? seByFilingId[filing.id] : null;
-      const bdcSnapshots = snapshotsByBdc[bdc.id] ?? [];
+      const bdcSnapshots = pairedSnapshots(snapshotsByBdc[bdc.id] ?? []);
       const latestSnapshot = bdcSnapshots[bdcSnapshots.length - 1];
 
       // Not enough live data yet (ETL hasn't processed this BDC) — use mock.

@@ -31,12 +31,25 @@ function DiscountBadge({ discount }) {
   );
 }
 
-function TrustBar({ score, incomplete }) {
+// Text listing exactly which inputs the score is missing — used as the tooltip
+// on both the trust bar and the completeness chip.
+function missingSummary(nt) {
+  if (!nt.missingComponents?.length) return 'Scored on all 6 components.';
+  return (
+    `Scored on ${nt.componentsAvailable}/${nt.componentsTotal} components ` +
+    `(${Math.round((nt.weightCovered ?? 0) * 100)}% of model weight).\n\nMissing:\n` +
+    nt.missingComponents
+      .map(m => `• ${m.label} (weight ${(m.weight * 100).toFixed(0)}%) — ${m.reason}`)
+      .join('\n')
+  );
+}
+
+function TrustBar({ score, incomplete, title }) {
   if (score == null) {
     return (
       <div className="flex items-center gap-2">
         <div className="flex-1 h-1.5 bg-slate-700/50 rounded-full overflow-hidden" />
-        <span className="text-xs font-mono text-slate-600 w-6 text-right" title="No asset-quality data yet">—</span>
+        <span className="text-xs font-mono text-slate-600 w-6 text-right" title={title ?? 'No asset-quality data yet'}>—</span>
       </div>
     );
   }
@@ -48,14 +61,45 @@ function TrustBar({ score, incomplete }) {
   else barColor = 'bg-red-500';
 
   return (
-    <div className="flex items-center gap-2">
+    <div className="flex items-center gap-2" title={title}>
       <div className="flex-1 h-1.5 bg-slate-700 rounded-full overflow-hidden">
         <div className={`h-full ${barColor} rounded-full transition-all ${incomplete ? 'opacity-50' : ''}`} style={{ width: `${score}%` }} />
       </div>
-      <span className={`text-xs font-mono w-6 text-right ${incomplete ? 'text-slate-400' : 'text-slate-200'}`} title={incomplete ? 'Partial score — some asset-quality data still missing' : undefined}>
+      <span className={`text-xs font-mono w-6 text-right ${incomplete ? 'text-slate-400' : 'text-slate-200'}`}>
         {score}{incomplete ? '*' : ''}
       </span>
     </div>
+  );
+}
+
+/**
+ * How much of the NAV Trust Score actually had data behind it.
+ *
+ * The old UI marked any partial score with a single '*'. Right now EVERY BDC
+ * is partial (0.17–0.67), so that asterisk marked all of them and told you
+ * nothing. This shows the count and colours by share of model WEIGHT covered,
+ * so a score built on one input is visibly different from one built on five.
+ */
+function CompletenessChip({ nt }) {
+  const have = nt.componentsAvailable ?? 0;
+  const total = nt.componentsTotal ?? 6;
+  const w = nt.weightCovered ?? 0;
+
+  let color;
+  if (have === 0)   color = 'bg-slate-800 text-slate-500 border-slate-700';
+  else if (w < 0.35) color = 'bg-red-900/50 text-red-300 border-red-700/50';
+  else if (w < 0.6)  color = 'bg-orange-900/50 text-orange-300 border-orange-700/50';
+  else if (w < 0.9)  color = 'bg-yellow-900/50 text-yellow-300 border-yellow-700/50';
+  else               color = 'bg-emerald-900/50 text-emerald-300 border-emerald-700/50';
+
+  return (
+    <span
+      title={missingSummary(nt)}
+      className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded border text-xs font-mono ${color}`}
+    >
+      {have}/{total}
+      <span className="opacity-60">·{Math.round(w * 100)}%</span>
+    </span>
   );
 }
 
@@ -107,6 +151,7 @@ const COLUMNS = [
   { key: 'price',            label: 'Price',            align: 'right' },
   { key: 'nav',              label: 'NAV',              align: 'right' },
   { key: 'navTrustScore',    label: 'NAV Trust',        align: 'left' },
+  { key: 'completeness',     label: 'Data',             align: 'center' },
   { key: 'software',         label: 'Soft %',           align: 'center' },
   { key: 'coverage',         label: 'Div Cov',          align: 'center' },
   { key: 'pik',              label: 'PIK %',            align: 'center' },
@@ -135,6 +180,7 @@ export default function BDCTable({ data, onSelectTicker, selectedTicker }) {
       case 'price':             return row.computed.valuation.price;
       case 'nav':               return row.computed.valuation.nav;
       case 'navTrustScore':     return row.computed.navTrust.score;
+      case 'completeness':      return row.computed.navTrust.weightCovered ?? 0;
       case 'software':          return row.sectorExposure.software;
       case 'coverage':          return row.assetQuality.dividendCoverage;
       case 'pik':               return row.assetQuality.pikIncomePct;
@@ -239,7 +285,16 @@ export default function BDCTable({ data, onSelectTicker, selectedTicker }) {
 
                 {/* NAV Trust Score */}
                 <td className="px-4 py-3 min-w-[120px]">
-                  <TrustBar score={nt.score} incomplete={nt.dataCompleteness != null && nt.dataCompleteness < 1} />
+                  <TrustBar
+                    score={nt.score}
+                    incomplete={nt.dataCompleteness != null && nt.dataCompleteness < 1}
+                    title={missingSummary(nt)}
+                  />
+                </td>
+
+                {/* Data completeness behind that score */}
+                <td className="px-4 py-3 text-center">
+                  <CompletenessChip nt={nt} />
                 </td>
 
                 {/* Software % */}
