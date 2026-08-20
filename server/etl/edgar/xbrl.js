@@ -5,8 +5,10 @@
  * Returns NAV per share, NII per share, and dividend per share history
  * by quarter — these are the fields that ARE available in XBRL for BDCs.
  *
- * Non-accruals, PIK %, and sector exposure are NOT in XBRL and require
- * document parsing (see scheduleParser.js).
+ * PIK income IS available in XBRL (as tagged dollar amounts) and is computed
+ * here — see computePikIncome. Non-accruals and sector exposure are not
+ * tagged by any filer in the universe and require document parsing (see
+ * nonAccrual.js and scheduleParser.js).
  *
  * API: https://data.sec.gov/api/xbrl/companyfacts/CIK{padded}.json
  */
@@ -225,4 +227,155 @@ export async function getLatestXBRLMetrics(cik, periodEnd = null) {
     periodEnd: periodEnd ?? nav?.period ?? null,
     outOfPeriod,
   };
+}
+
+// ─── PIK income ──────────────────────────────────────────────────────────────
+
+/**
+ * PIK income concepts, split by role. Getting this split right is the whole
+ * job — the names are close enough that mixing them produces silent errors.
+ *
+ * NUMERATOR concepts are DOLLARS of payment-in-kind income for the period.
+ * Explicitly NOT included:
+ *
+ *   InvestmentInterestRatePaidInKind  a RATE (e.g. 2.50), not an amount.
+ *                                     Averaging or summing it is meaningless.
+ *   PaidInKindInterest / DividendsPaidinkind
+ *                                     cash-flow-statement non-cash add-backs,
+ *                                     not investment-income line items.
+ *
+ * This replaces a text regex — /(?:pik|payment.in.kind)[^.]*?(\d+\.?\d*)\s*%/ —
+ * that took the first percentage after the first "PIK" anywhere in the
+ * document. Because "PIK" appears on nearly every row of a Schedule of
+ * Investments as part of a coupon ("SOFR + 5.00%, 2.50% PIK"), what it
+ * actually captured was an interest rate, not an income share. Verified
+ * against real filings it returned: ARCC 5.75 (a SOFR spread), CGBD 9.85
+ * (an all-in rate), MSDL 9.92 (an interest rate), GSBD 232.7 ("Debt
+ * Investments - 232.7%", a percent-of-net-assets heading), NSLR 90 (the
+ * RIC distribution requirement) and PSEC 25.00 ("greater than 25.00%
+ * voting control"). Not one value in the universe was a PIK income share.
+ */
+const PIK_COMBINED = 'InterestAndDividendIncomeOperatingPaidInKind';
+const PIK_INTEREST = 'InterestIncomeOperatingPaidInKind';
+const PIK_DIVIDEND = 'DividendIncomeOperatingPaidInKind';
+
+// Denominator: total investment income for the period.
+const TOTAL_INCOME          = 'GrossInvestmentIncomeOperating';
+const TOTAL_INCOME_FALLBACK = 'InvestmentIncomeNet';
+const NET_INVESTMENT_INCOME = 'NetInvestmentIncome';
+
+// A single quarter is ~91 days. Anything longer is a fiscal-year-to-date
+// cumulative that a 10-Q reports alongside the quarter (see extractQuarterly);
+// mixing a YTD numerator with a quarterly denominator would overstate PIK by
+// 2-3x. Instants (duration 0) are balance-sheet facts and never income.
+const isSingleQuarter = days => days > 60 && days <= 100;
+
+/** USD duration facts for one concept, single-quarter only, newest filing wins. */
+function quarterlyUsd(facts, name) {
+  const entries = facts?.['us-gaap']?.[name]?.units?.USD;
+  if (!Array.isArray(entries)) return new Map();
+  const byEnd = new Map();
+  for (const e of entries) {
+    if (!['10-Q', '10-K'].includes(e.form) || !e.start) continue;
+    if (!isSingleQuarter((new Date(e.end) - new Date(e.start)) / 86400000)) continue;
+    // Dimensional breakdowns (per-segment members) carry the same end date as
+    // the consolidated total; companyfacts omits the member axis, so the only
+    // defence is taking the latest-filed fact per period rather than summing.
+    const prior = byEnd.get(e.end);
+    if (!prior || e.filed > prior.filed) byEnd.set(e.end, { val: e.val, filed: e.filed });
+  }
+  return byEnd;
+}
+
+/**
+ * PIK income as a percentage of total investment income, for a period and
+ * the quarter before it.
+ *
+ * The prior quarter is the point of this: scorePIK needs BOTH quarters to
+ * judge the trend, and `pik_income_prior_pct` was never populated by any
+ * code path, so the PIK component — 20% of the model weight — could not
+ * score for a single BDC in the universe. It comes free here, since the
+ * whole companyfacts blob is already in hand.
+ *
+ * @param {object} facts - the `facts` object from companyfacts
+ * @param {string|null} periodEnd - 'YYYY-MM-DD'; null = newest available
+ * @returns {{pct, priorPct, period, priorPeriod, numeratorUsd, totalUsd, source, note}}
+ */
+export function computePikIncome(facts, periodEnd = null) {
+  const combined = quarterlyUsd(facts, PIK_COMBINED);
+  const interest = quarterlyUsd(facts, PIK_INTEREST);
+  const dividend = quarterlyUsd(facts, PIK_DIVIDEND);
+  let total      = quarterlyUsd(facts, TOTAL_INCOME);
+  let totalSource = TOTAL_INCOME;
+
+  if (total.size === 0) {
+    // Guarded fallback. `InvestmentIncomeNet` is ambiguously named — for some
+    // filers it is gross investment income, for others it would be the net
+    // figure — so it is only trusted where NetInvestmentIncome also exists
+    // for the same period and is SMALLER, which proves the fact really is
+    // the gross line. Without that check this silently divides by a
+    // post-expense number and roughly doubles every PIK percentage.
+    const candidate = quarterlyUsd(facts, TOTAL_INCOME_FALLBACK);
+    const net = quarterlyUsd(facts, NET_INVESTMENT_INCOME);
+    const verified = new Map();
+    for (const [end, fact] of candidate) {
+      const n = net.get(end);
+      if (n && fact.val > n.val) verified.set(end, fact);
+    }
+    total = verified;
+    totalSource = `${TOTAL_INCOME_FALLBACK} (verified > ${NET_INVESTMENT_INCOME})`;
+  }
+
+  const numeratorFor = end => {
+    // Combined tag already includes dividend PIK — adding the separate
+    // concepts on top would double-count.
+    if (combined.has(end)) return { usd: combined.get(end).val, source: 'combined' };
+    const i = interest.get(end);
+    if (!i) {
+      // Dividend PIK alone is not a usable numerator: it is the small
+      // component. BCSF's 2026-06-30 tags only DividendIncomeOperatingPaidInKind
+      // ($0.7M) while the interest component ($7.4M the prior quarter) is
+      // absent, so summing what's present would report 1.1% against a real
+      // figure near 12%. Report nothing instead of a 10x undercount.
+      return dividend.has(end)
+        ? { usd: null, source: 'dividend-only', note: 'interest PIK not tagged for this period — dividend PIK alone would understate' }
+        : { usd: null, source: 'none' };
+    }
+    const d = dividend.get(end);
+    return { usd: i.val + (d?.val ?? 0), source: d ? 'interest+dividend' : 'interest' };
+  };
+
+  const pctFor = end => {
+    if (!end) return { pct: null };
+    const t = total.get(end);
+    const n = numeratorFor(end);
+    if (!t || t.val <= 0 || n.usd == null) return { pct: null, ...n };
+    return { pct: parseFloat(((n.usd / t.val) * 100).toFixed(3)), numeratorUsd: n.usd, totalUsd: t.val, ...n };
+  };
+
+  // Period ends that have a denominator, newest first.
+  const ends = [...total.keys()].sort().reverse();
+  const period = periodEnd && total.has(periodEnd) ? periodEnd : (periodEnd ? null : ends[0] ?? null);
+  const priorPeriod = period ? ends.find(e => e < period) ?? null : null;
+
+  const current = pctFor(period);
+  const prior   = pctFor(priorPeriod);
+
+  return {
+    pct:          current.pct ?? null,
+    priorPct:     prior.pct ?? null,
+    period,
+    priorPeriod,
+    numeratorUsd: current.numeratorUsd ?? null,
+    totalUsd:     current.totalUsd ?? null,
+    source:       current.source ?? 'none',
+    totalSource,
+    note:         current.note ?? null,
+  };
+}
+
+/** Convenience wrapper: fetch companyfacts and compute PIK for a period. */
+export async function getPikIncome(cik, periodEnd = null) {
+  const data = await fetchCompanyFacts(cik);
+  return computePikIncome(data?.facts ?? {}, periodEnd);
 }

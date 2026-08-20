@@ -21,7 +21,7 @@
 
 import { BDC_UNIVERSE } from './constants.js';
 import { getRecentFilings, fetchFilingDocument } from './edgar/submissions.js';
-import { fetchXBRLMetrics, getLatestXBRLMetrics } from './edgar/xbrl.js';
+import { fetchXBRLMetrics, getLatestXBRLMetrics, getPikIncome } from './edgar/xbrl.js';
 import { fetchInsiderTrades } from './edgar/form4.js';
 import { parseScheduleOfInvestments } from './edgar/scheduleParser.js';
 import { fetchAllPrices } from './market/prices.js';
@@ -141,6 +141,33 @@ async function processBDC(bdc, priceData) {
     : [];
   await upsertPortfolioMetrics(ticker, filingPeriodId, xbrlMetrics, staleDividendFields);
 
+  // ── Step 2b: PIK income from XBRL ────────────────────────────────
+  // PIK is now sourced from tagged dollar amounts (PIK income / total
+  // investment income) rather than scraped from prose — see computePikIncome
+  // in xbrl.js for what the old text regex was actually matching. This also
+  // fills pik_income_prior_pct, which no code path had ever written, leaving
+  // scorePIK unable to run for ANY BDC in the universe.
+  try {
+    const pik = await getPikIncome(cik, latestFiling.reportDate);
+    // Values already stored under the text-regex era are coupon rates, not
+    // income shares. Clear them whenever we can't replace them, or they
+    // survive forever — upsertPortfolioMetrics strips nulls by design.
+    const stalePikFields = [];
+    if (pik.pct == null) stalePikFields.push('pik_income_pct');
+    if (pik.priorPct == null) stalePikFields.push('pik_income_prior_pct');
+
+    await upsertPortfolioMetrics(ticker, filingPeriodId, {
+      pikIncomePct:      pik.pct,
+      pikIncomePriorPct: pik.priorPct,
+    }, stalePikFields);
+
+    stepResults.pik = { pct: pik.pct, priorPct: pik.priorPct, source: pik.source, period: pik.period };
+    console.log(`[${ticker}] PIK: ${pik.pct ?? '—'}% (prior ${pik.priorPct ?? '—'}%) via ${pik.source}${pik.note ? ` — ${pik.note}` : ''}`);
+  } catch (err) {
+    console.warn(`[${ticker}] PIK fetch failed: ${err.message}`);
+    stepResults.pikError = err.message;
+  }
+
   // ── Step 3: Schedule of Investments parsing ───────────────────────
   // Only parse if the filing hasn't been processed yet.
   // This is the slow/fragile step — skip it if XBRL covered the gaps.
@@ -175,30 +202,52 @@ async function processBDC(bdc, priceData) {
         ? parseFloat((niiToWrite / xbrlMetrics.dividendPerShare).toFixed(4))
         : null;
 
+      // Same retraction principle as the dividend fields above: everything
+      // stored in the non-accrual columns before this parser existed came
+      // from a regex that matched the first percentage after the word
+      // "non-accrual" anywhere in the document (CGBD 100%, BCSF 96.8%,
+      // MSDL 97.1%, PSEC 85.2%). Those are not recoverable by writing a
+      // better value only when one is found — the bad ones have to be
+      // cleared explicitly, or a filer we now correctly read as "no
+      // disclosure" keeps its old fabricated number forever.
+      const staleNonAccrualFields = [];
+      if (parsed.non_accrual_cost_pct == null) staleNonAccrualFields.push('non_accrual_cost_pct');
+      if (parsed.non_accrual_fv_pct == null) staleNonAccrualFields.push('non_accrual_fv_pct');
+
       await upsertPortfolioMetrics(ticker, filingPeriodId, {
         nonAccrualCostPct:         parsed.non_accrual_cost_pct,
         nonAccrualFVPct:           parsed.non_accrual_fv_pct,
-        pikIncomePct:              parsed.pik_income_pct,
         qoqMarkdownPct:            parsed.qoq_markdown_pct,
         trailingRealizedLossesPct: parsed.trailing_realized_losses_pct,
         niiPerShare:               niiToWrite,
         dividendCoverage:          dividendCoverageToWrite,
         dataSource:                parsed.data_source,
-      });
+      }, staleNonAccrualFields);
       stepResults.scheduleParser = { fields: Object.keys(parsed), notes, niiFromText: niiToWrite != null };
     }
-    if (Object.keys(sectorExposure).length > 0) {
-      await upsertSectorExposure(ticker, filingPeriodId, {
-        softwarePct:    sectorExposure.software_pct,
-        healthcarePct:  sectorExposure.healthcare_pct,
-        consumerPct:    sectorExposure.consumer_pct,
-        industrialPct:  sectorExposure.industrial_pct,
-        assetBackedPct: sectorExposure.asset_backed_pct,
-        financialPct:   sectorExposure.financial_pct,
-        otherPct:       sectorExposure.other_pct,
-        dataSource:     'parsed',
-      });
-    }
+    // Sector columns are written when the parse reconciles against the XBRL
+    // portfolio total, and actively RETRACTED when it doesn't. The parser
+    // used to accept any SOI-shaped table, which put breakdowns in the DB
+    // that don't reconcile — GLAD at "other 100%", several filers reduced to
+    // a financial/other split. Those can't be corrected by writing better
+    // values only when we find them: the filers we now correctly refuse to
+    // guess about would keep their old numbers indefinitely.
+    const SECTOR_COLUMNS = [
+      'software_pct', 'healthcare_pct', 'consumer_pct', 'industrial_pct',
+      'asset_backed_pct', 'financial_pct', 'other_pct', 'top_10_holdings_pct',
+    ];
+    const staleSectorFields = SECTOR_COLUMNS.filter(c => sectorExposure[c] == null);
+    await upsertSectorExposure(ticker, filingPeriodId, {
+      softwarePct:      sectorExposure.software_pct,
+      healthcarePct:    sectorExposure.healthcare_pct,
+      consumerPct:      sectorExposure.consumer_pct,
+      industrialPct:    sectorExposure.industrial_pct,
+      assetBackedPct:   sectorExposure.asset_backed_pct,
+      financialPct:     sectorExposure.financial_pct,
+      otherPct:         sectorExposure.other_pct,
+      top10HoldingsPct: sectorExposure.top_10_holdings_pct,
+      dataSource:       'parsed',
+    }, staleSectorFields);
 
     if (notes.length) console.log(`[${ticker}] Parser notes:`, notes.join('; '));
   } catch (err) {

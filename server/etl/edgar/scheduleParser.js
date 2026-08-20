@@ -1,25 +1,29 @@
 /**
- * Schedule of Investments Parser
+ * Filing Document Parser
  *
- * Extracts non-accrual %, PIK income %, and sector exposure from the
- * Schedule of Investments (SOI) table inside a 10-Q or 10-K HTML filing.
+ * Extracts, from the HTML of a 10-Q/10-K, the metrics that are NOT available
+ * as XBRL facts:
  *
- * The hard reality: every BDC formats their SOI differently. This file
- * contains a generic extractor + per-BDC overrides. Expect to tune these
- * as new filings come in — that's normal for this kind of parsing.
+ *   non-accrual %      → delegated to nonAccrual.js
+ *   sector exposure    → aggregated from the Schedule of Investments
+ *   realized losses /
+ *   unrealized markdown → matched from the Statement of Operations
+ *   NII per share      → fallback only, when XBRL doesn't tag it
  *
- * Strategy:
- *   1. Try to find the SOI table (look for "Schedule of Investments" heading)
- *   2. Parse the HTML table rows with cheerio
- *   3. Aggregate by industry/sector to compute sector exposure %
- *   4. Look for explicit non-accrual and PIK flagging in the notes
+ * PIK income is deliberately NOT handled here. It is tagged in XBRL as a
+ * pair of dollar figures (see computePikIncome in xbrl.js), and the text
+ * regex that used to produce it was matching Schedule-of-Investments coupon
+ * rates — "SOFR + 5.00%, 2.50% PIK" — rather than any income share. It was
+ * wrong for all 45 BDCs in the universe.
  *
- * For now, most of these fields will come from the mock data / manual entry
- * while you build out the per-BDC parsers. The stub structure here shows
- * how to wire in real parsing without changing the calling code.
+ * The hard reality: every BDC formats their filings differently. Where a
+ * pattern can't be resolved unambiguously the extractor returns nothing
+ * rather than a guess — a wrong number here feeds both the NAV Trust Score
+ * and a column the UI presents as fact, so silence is the safer failure.
  */
 
 import * as cheerio from 'cheerio';
+import { extractNonAccrual } from './nonAccrual.js';
 
 /**
  * Main entry point. Returns a partial portfolio_metrics + sector_exposure
@@ -89,92 +93,185 @@ export function parseScheduleOfInvestments(html, ticker, totalInvestmentsFairVal
     notes.push('SOI table not found — check filing format (sector exposure unavailable, non-accrual/PIK still attempted from document text)');
   }
 
-  // ── Parse rows ───────────────────────────────────────────────
-  const rows = [];
-  if (soiTable) {
-    $(soiTable).find('tr').each((_, tr) => {
-      const cells = $(tr).find('td,th').map((_, td) => $(td).text().trim()).get();
-      if (cells.length > 0) rows.push(cells);
-    });
-  }
-
   // ── Sector aggregation ───────────────────────────────────────
-  // BDCs group rows by industry header. We accumulate fair value by sector.
-  const sectorTotals = {};
-  let totalFairValue = 0;
-  let currentSector = 'Other';
-
+  // Aggregates fair value by the SOI's own Industry column.
+  //
+  // The previous implementation classified on "row has <=2 cells and the
+  // first is ALL CAPS", which never fires on real filings — industry
+  // labels are Title Case cells inside wide rows ("Diversified Financial
+  // Services", "Energy: Oil & Gas"). So `currentSector` stayed 'Other' for
+  // every row and the value it summed was the row's last numeric cell,
+  // which is the "% of Net Assets" column, not fair value. The result was
+  // 51 sector_exposure rows in production that were 100% "other" or empty
+  // — rows that look like data and contain none.
+  //
+  // Known limitation: the SOI is split across dozens of separate HTML
+  // tables (57 for ARCC), and not every filer even has an Industry column
+  // — ARCC uses a free-text "Business Description" instead. So this is
+  // partial by construction, which is exactly why the validation below
+  // exists: a partial classification is discarded rather than stored.
   const SECTOR_MAP = {
-    software:    /software|technology|tech|saas|internet|cloud/i,
+    software:    /software|technology|tech\b|saas|internet|cloud|it services/i,
     healthcare:  /health|pharma|medical|biotech|life science/i,
-    consumer:    /consumer|retail|food|restaurant|beverage|apparel/i,
-    industrial:  /industrial|manufacturing|logistics|transport|aerospace|defense/i,
-    assetBacked: /asset.backed|structured|abs|clo|real estate/i,
-    financial:   /financial|insurance|bank|lending|credit/i,
+    consumer:    /consumer|retail|food|restaurant|beverage|apparel|leisure/i,
+    industrial:  /industrial|manufactur|logistics|transport|aerospace|defense|capital goods|chemicals|energy|utilities/i,
+    assetBacked: /asset.backed|structured|\babs\b|\bclo\b|real estate/i,
+    financial:   /financial|insurance|bank|lending|credit|diversified financial/i,
   };
 
-  function classifySector(label) {
-    for (const [key, re] of Object.entries(SECTOR_MAP)) {
-      if (re.test(label)) return key;
-    }
+  const classifySector = label => {
+    for (const [key, re] of Object.entries(SECTOR_MAP)) if (re.test(label)) return key;
     return 'other';
-  }
+  };
 
-  for (const row of rows) {
-    const firstCell = row[0] ?? '';
+  const HEADER_INDUSTRY = /^(industry|sector)$/i;
+  const HEADER_FAIR_VALUE = /fair\s*value/i;
 
-    // Detect sector header rows (typically all-caps or bold, single cell)
-    if (row.length <= 2 && firstCell.length > 3 && firstCell === firstCell.toUpperCase()) {
-      currentSector = classifySector(firstCell);
-      continue;
+  const sectorTotals = {};
+  const companyTotals = {};
+  let totalFairValue = 0;
+
+  $('table').each((_, table) => {
+    // Built with an explicit loop: cheerio's .map().get() FLATTENS nested
+    // results, so the idiomatic nested form yields one long array of cells
+    // instead of an array of rows.
+    const rows = [];
+    for (const tr of $(table).find('tr').toArray()) {
+      rows.push($(tr).find('td,th').toArray().map(td => $(td).text().trim().replace(/\s+/g, ' ')));
     }
+    if (rows.length < 3) return;
 
-    // Try to parse a fair value from the last numeric cell
-    const lastNumeric = [...row].reverse().find(c => /^\$?[\d,]+(\.\d+)?$/.test(c.replace(/\s/g, '')));
-    if (lastNumeric) {
-      const fv = parseFloat(lastNumeric.replace(/[$,]/g, ''));
-      if (!isNaN(fv) && fv > 0) {
-        sectorTotals[currentSector] = (sectorTotals[currentSector] ?? 0) + fv;
-        totalFairValue += fv;
+    // Locate the header row and the two columns we need. Both must exist:
+    // without an explicit Fair Value column there is no way to know that
+    // the number being summed isn't a coupon, a par amount, or a
+    // percentage-of-net-assets figure.
+    let industryCol = -1, fvCol = -1;
+    for (const row of rows.slice(0, 4)) {
+      const iIdx = row.findIndex(c => HEADER_INDUSTRY.test(c));
+      const fIdx = row.findIndex(c => HEADER_FAIR_VALUE.test(c));
+      if (iIdx >= 0 && fIdx >= 0) { industryCol = iIdx; fvCol = fIdx; break; }
+    }
+    if (industryCol < 0 || fvCol < 0) return;
+
+    for (const row of rows) {
+      const label = row[industryCol];
+      const cell  = row[fvCol];
+      if (!label || !cell || HEADER_INDUSTRY.test(label)) continue;
+      if (!/^\$?\s*[\d,]+(\.\d+)?$/.test(cell.replace(/\s/g, ''))) continue;
+      const fv = parseFloat(cell.replace(/[$,\s]/g, ''));
+      if (!Number.isFinite(fv) || fv <= 0) continue;
+      const key = classifySector(label);
+      sectorTotals[key] = (sectorTotals[key] ?? 0) + fv;
+      totalFairValue += fv;
+
+      // Top-10 concentration is per PORTFOLIO COMPANY, not per row: a single
+      // borrower routinely appears on several rows (first lien, second lien,
+      // revolver, equity), and counting rows would understate concentration
+      // by splitting one name across several entries.
+      const company = (row[0] ?? '').replace(/\(\d+\)|\(\w\)/g, '').trim();
+      if (company && !/^\$?[\d,.]+$/.test(company)) {
+        companyTotals[company] = (companyTotals[company] ?? 0) + fv;
       }
     }
-  }
+  });
 
-  // Convert to percentages
+  // ── Validation ───────────────────────────────────────────────
+  // Sector data is only written when the parsed Schedule of Investments
+  // RECONCILES against the portfolio fair value that XBRL reports
+  // independently. Without that check there is no way to tell a complete
+  // parse from a partial or double-counted one, and both produce a
+  // confident-looking breakdown.
+  //
+  // Measured against real filings, the current table-scraping approach does
+  // NOT reconcile: after correcting for the thousands scale that most SOI
+  // tables use, coverage came out at 18% for CGBD (most of the SOI lives in
+  // tables without both header columns) and 227%, 361% and 183% for OCSL,
+  // PFLT and PSEC (subtotal rows summed alongside the detail rows they
+  // total). FSK reconciles to 44%. None of those is a portfolio breakdown,
+  // even though each yields plausible-looking percentages that add to 100.
+  //
+  // So this currently writes nothing for every filer — which is the point.
+  // The previous version wrote 51 sector_exposure rows that were empty or
+  // 100% "other". Emitting no row is strictly more honest, and the check is
+  // self-correcting: improve the SOI table selection so the parse actually
+  // reconciles, and the data starts flowing without touching this gate.
+  const MAX_OTHER_SHARE_PCT = 60;
+  const RECONCILE_MIN = 0.8;
+  const RECONCILE_MAX = 1.25;
+
   const sectorExposure = {};
-  if (totalFairValue > 0) {
-    for (const [sector, fv] of Object.entries(sectorTotals)) {
-      sectorExposure[`${sector}_pct`] = parseFloat(((fv / totalFairValue) * 100).toFixed(3));
+  if (totalFairValue <= 0) {
+    notes.push('Sector exposure unavailable — no SOI table with both Industry and Fair Value columns');
+  } else if (!totalInvestmentsFairValueUSD) {
+    notes.push('Sector exposure skipped — no XBRL portfolio fair value to reconcile the parsed SOI against');
+  } else {
+    // SOI tables are usually captioned "(in thousands)" while the XBRL fact
+    // is absolute dollars. Try both scales and keep whichever lands closer
+    // to a full portfolio rather than assuming either.
+    const scaled = [1, 1_000]
+      .map(scale => ({ scale, coverage: (totalFairValue * scale) / totalInvestmentsFairValueUSD }))
+      .sort((a, b) => Math.abs(Math.log(a.coverage)) - Math.abs(Math.log(b.coverage)))[0];
+
+    const pct = fv => parseFloat(((fv / totalFairValue) * 100).toFixed(3));
+    const otherShare = pct(sectorTotals.other ?? 0);
+    const named = Object.keys(sectorTotals).filter(k => k !== 'other');
+    const reconciles = scaled.coverage >= RECONCILE_MIN && scaled.coverage <= RECONCILE_MAX;
+
+    if (reconciles && named.length >= 2 && otherShare <= MAX_OTHER_SHARE_PCT) {
+      for (const [sector, fv] of Object.entries(sectorTotals)) {
+        const col = sector === 'assetBacked' ? 'asset_backed_pct' : `${sector}_pct`;
+        sectorExposure[col] = pct(fv);
+      }
+      // Per portfolio COMPANY, not per row — one borrower routinely appears
+      // on several rows (first lien, second lien, revolver, equity), and
+      // counting rows would understate concentration.
+      const companies = Object.values(companyTotals).sort((a, b) => b - a);
+      if (companies.length >= 10) {
+        sectorExposure.top_10_holdings_pct = pct(companies.slice(0, 10).reduce((a, b) => a + b, 0));
+      }
+      notes.push(`Sector exposure: ${named.length} sectors, other=${otherShare}%, top10=${sectorExposure.top_10_holdings_pct ?? '—'}% (SOI reconciles to ${(scaled.coverage * 100).toFixed(0)}% of XBRL portfolio FV at ${scaled.scale}x)`);
+    } else if (!reconciles) {
+      notes.push(`Sector exposure discarded — parsed SOI totals ${(scaled.coverage * 100).toFixed(0)}% of XBRL portfolio FV (need ${RECONCILE_MIN * 100}-${RECONCILE_MAX * 100}%); the parse is partial or double-counted, so the breakdown is not trustworthy`);
+    } else {
+      notes.push(`Sector exposure discarded — ${named.length} named sector(s), other=${otherShare}% (needs >=2 named and other<=${MAX_OTHER_SHARE_PCT}%)`);
     }
   }
 
-  // ── Non-accrual detection ────────────────────────────────────
-  // BDCs footnote non-accrual loans. Look for the annotation in text.
-  let nonAccrualCostPct  = null;
-  let nonAccrualFVPct    = null;
+  // Whitespace-normalized document text. Collapsing runs of whitespace
+  // matters for every pattern below: filing HTML puts cell boundaries and
+  // line wraps in the middle of phrases, so "Amortized\n   Cost" only reads
+  // as "Amortized Cost" after normalization.
+  const bodyText = $('body').text().replace(/\s+/g, ' ');
 
-  const bodyText = $('body').text();
+  // ── Non-accrual ──────────────────────────────────────────────
+  // Delegated to nonAccrual.js — see that module for why a single regex
+  // cannot do this job. It returns cost and fair-value percentages
+  // separately; the previous code filed whatever it found into the fair
+  // value column regardless of which basis the filing actually stated,
+  // so ARCC's 2.4%-at-amortized-cost was stored as a fair-value figure
+  // (its real fair-value number is 1.4%).
+  let nonAccrualCostPct = null;
+  let nonAccrualFVPct   = null;
 
-  // Pattern: "non-accrual investments... $X... representing Y% of..."
-  const naMatch = bodyText.match(
-    /non.accrual[^.]*?(\d+\.?\d*)\s*%\s*(?:of\s+)?(?:total\s+)?(?:investments?\s+at\s+)?(?:fair\s+value)?/i
-  );
-  if (naMatch) {
-    nonAccrualFVPct = parseFloat(naMatch[1]);
-    notes.push(`Non-accrual FV% extracted from text: ${nonAccrualFVPct}`);
+  const na = extractNonAccrual(bodyText);
+  if (na) {
+    nonAccrualCostPct = na.costPct;
+    nonAccrualFVPct   = na.fvPct;
+    notes.push(`Non-accrual via ${na.method}: cost=${na.costPct ?? '—'}% fv=${na.fvPct ?? '—'}% — "${na.evidence.slice(0, 90)}"`);
+  } else {
+    notes.push('No non-accrual disclosure found (filer may not state a portfolio percentage)');
   }
 
-  // ── PIK detection ────────────────────────────────────────────
-  // Look for "PIK" or "payment-in-kind" income disclosure
-  let pikIncomePct = null;
-
-  const pikMatch = bodyText.match(
-    /(?:pik|payment.in.kind)[^.]*?(\d+\.?\d*)\s*%/i
-  );
-  if (pikMatch) {
-    pikIncomePct = parseFloat(pikMatch[1]);
-    notes.push(`PIK% extracted from text: ${pikIncomePct}`);
-  }
+  // ── PIK income ───────────────────────────────────────────────
+  // Deliberately NOT parsed here any more. PIK income as a share of total
+  // investment income comes from XBRL (see computePikIncome in xbrl.js),
+  // where it is a pair of tagged dollar figures rather than a number
+  // scraped out of prose. The text regex this replaced was matching coupon
+  // rates off the Schedule of Investments — every "SOFR + 5.00%, 2.50%
+  // PIK" row is a candidate — and produced a wrong value for all 45 BDCs
+  // in the universe. Nothing to fall back to here: a wrong PIK number is
+  // worse than no PIK number, because it feeds a 20%-weight score
+  // component and a "PIK %" column that reads as fact.
 
   // ── Document dollar scale ───────────────────────────────────
   // BDCs almost universally caption their financial statements
@@ -397,7 +494,6 @@ export function parseScheduleOfInvestments(html, ticker, totalInvestmentsFairVal
     portfolioMetrics: {
       non_accrual_fv_pct:  nonAccrualFVPct,
       non_accrual_cost_pct: nonAccrualCostPct,
-      pik_income_pct:      pikIncomePct,
       qoq_markdown_pct:    qoqMarkdownPct,
       trailing_realized_losses_pct: trailingRealizedLossesPct,
       nii_per_share_text:  niiPerShare,
