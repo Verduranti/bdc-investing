@@ -12,7 +12,8 @@
     "etl:local": "node --env-file=.env server/etl/index.js",
     "etl:check": "node server/etl/healthcheck.js",
     "backfill": "node server/etl/backfill-valuations.js",
-    "backfill:local": "node --env-file=.env server/etl/backfill-valuations.js"
+    "backfill:local": "node --env-file=.env server/etl/backfill-valuations.js",
+    "test:parsers": "node server/etl/edgar/__tests__/nonAccrual.test.mjs && node server/etl/edgar/__tests__/pikIncome.test.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.50.0",

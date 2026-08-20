@@ -144,7 +144,15 @@ export async function upsertPortfolioMetrics(ticker, filingPeriodId, metrics, cl
 
 // ── Sector Exposure ────────────────────────────────────────────────────────
 
-export async function upsertSectorExposure(ticker, filingPeriodId, exposure) {
+/**
+ * @param {string[]} clearFields - columns to write as NULL even though the
+ *   null-strip below would normally protect them. Same retraction mechanism
+ *   as upsertPortfolioMetrics: when the parser can no longer substantiate a
+ *   value it previously wrote, the value has to be actively withdrawn.
+ *   Writing only when a NEW value is found would preserve the old one
+ *   forever, which is how a superseded parser's output outlives it.
+ */
+export async function upsertSectorExposure(ticker, filingPeriodId, exposure, clearFields = []) {
   const bdc_id = await getBdcId(ticker);
 
   const row = Object.fromEntries(
@@ -162,6 +170,9 @@ export async function upsertSectorExposure(ticker, filingPeriodId, exposure) {
       data_source:      exposure.dataSource       ?? 'etl',
     }).filter(([, v]) => v !== null)
   );
+
+  // Applied after the strip, so these survive it deliberately.
+  for (const column of clearFields) row[column] = null;
 
   check(
     await supabase
