@@ -16,6 +16,7 @@ export default defineConfig(({ mode }) => {
     plugins: [react()],
     build: {
       emptyOutDir: false,
+      assetsDir: 'bdc-assets',
     },
     define: {
       'import.meta.env.SUPABASE_URL': JSON.stringify(env.SUPABASE_URL ?? ''),
