@@ -117,11 +117,15 @@ create index if not exists idx_valuation_bdc_date
   on valuation_snapshots (bdc_id, snapshot_date desc);
 
 -- ── 6. Insider Activity ───────────────────────────────────────
--- Form 4 trades. Deduped on accession number.
+-- Form 4 trades. Deduped on (accession number, transaction index) — a
+-- single Form 4 routinely reports several transactions (e.g. multiple
+-- open-market buys on different dates), all sharing one accession_number,
+-- so that alone can't be the row's uniqueness key.
 create table if not exists insider_activity (
   id                  serial primary key,
   bdc_id              integer not null references bdcs(id) on delete cascade,
-  accession_number    text not null unique,
+  accession_number    text not null,
+  transaction_index   integer not null default 0,  -- position within the filing
   transaction_date    date,
   filed_at            date,
   trade_type          text,         -- 'buy' | 'sell'
@@ -131,7 +135,8 @@ create table if not exists insider_activity (
   insider_title       text,
   is_direct           boolean,      -- direct ownership vs. indirect
   raw_xml             text,         -- original Form 4 XML for reprocessing
-  created_at          timestamptz not null default now()
+  created_at          timestamptz not null default now(),
+  unique (accession_number, transaction_index)
 );
 
 create index if not exists idx_insider_bdc_date

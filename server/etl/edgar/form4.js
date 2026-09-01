@@ -58,6 +58,12 @@ function parseForm4XML(xml, accessionNumber, filedAt) {
   // Parse non-derivative transactions (direct stock purchases/sales)
   const txBlocks = xmlBlocks(xml, 'nonDerivativeTransaction');
 
+  // A single Form 4 routinely reports several transactions under one
+  // accession_number (e.g. multiple open-market buys on different dates) —
+  // accession_number alone identifies the FILING, not a transaction within
+  // it, so it can't be the row's uniqueness key on its own. transactionIndex
+  // pairs with it to give each transaction row a stable identity.
+  let transactionIndex = 0;
   for (const block of txBlocks) {
     const dateStr   = xmlText(block, 'transactionDate');
     const sharesStr = xmlText(block, 'transactionShares');
@@ -71,6 +77,7 @@ function parseForm4XML(xml, accessionNumber, filedAt) {
 
     trades.push({
       accession_number: accessionNumber,
+      transaction_index: transactionIndex++,
       transaction_date: dateStr,
       filed_at:         filedAt,
       trade_type:       adCode === 'A' ? 'buy' : 'sell',

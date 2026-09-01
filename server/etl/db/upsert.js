@@ -300,7 +300,8 @@ export async function upsertInsiderTrades(ticker, trades) {
 
   const rows = trades.map(t => ({
     bdc_id,
-    accession_number: t.accession_number,
+    accession_number:  t.accession_number,
+    transaction_index: t.transaction_index,
     transaction_date: t.transaction_date,
     filed_at:         t.filed_at,
     trade_type:       t.trade_type,
@@ -315,7 +316,7 @@ export async function upsertInsiderTrades(ticker, trades) {
   check(
     await supabase
       .from('insider_activity')
-      .upsert(rows, { onConflict: 'accession_number' }),
+      .upsert(rows, { onConflict: 'accession_number,transaction_index' }),
     'upsertInsiderTrades'
   );
 }
