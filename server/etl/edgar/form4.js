@@ -99,18 +99,21 @@ export async function fetchInsiderTrades(cik, limit = 20) {
 
   for (const filing of filings) {
     try {
-      const xml = await fetchFilingDocument(filing.docUrl);
-      // Form 4 primary doc is .xml; if we got HTML, find the XML link
-      if (!xml.includes('<ownershipDocument>')) {
-        // Try to find the .xml file in the filing index
-        const xmlUrl = filing.docUrl.replace(/\.(htm|html)$/i, '.xml');
-        const xmlDoc = await fetchFilingDocument(xmlUrl);
-        const trades = parseForm4XML(xmlDoc, filing.accessionNumber, filing.filingDate);
-        allTrades.push(...trades);
-      } else {
-        const trades = parseForm4XML(xml, filing.accessionNumber, filing.filingDate);
-        allTrades.push(...trades);
-      }
+      // EDGAR's `primaryDocument` for Form 3/4/5 is the XSLT-rendered
+      // human-viewer path — e.g. "xslF345X05/tm265470-5_4seq1.xml" — which
+      // despite the .xml extension serves rendered HTML, not the
+      // <ownershipDocument> XML. Confirmed against a real ARCC filing: that
+      // URL returns an HTML page with no ownershipDocument tag at all, so
+      // parseForm4XML silently found zero <nonDerivativeTransaction> blocks
+      // for every filing, for every BDC, forever. The old fallback here only
+      // swapped a .htm/.html extension for .xml, which no-ops on a URL that
+      // already ends in .xml and just refetches the same broken page. The
+      // real raw XML lives one directory up, without the xsl*/ viewer
+      // subdirectory — stripping it is what actually reaches the data.
+      const rawXmlUrl = filing.docUrl.replace(/\/xsl[^/]+\//, '/');
+      const xml = await fetchFilingDocument(rawXmlUrl);
+      const trades = parseForm4XML(xml, filing.accessionNumber, filing.filingDate);
+      allTrades.push(...trades);
     } catch (err) {
       // Non-fatal: log and continue
       console.warn(`  Form 4 parse failed for ${filing.accessionNumber}: ${err.message}`);
