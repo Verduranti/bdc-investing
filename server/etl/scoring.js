@@ -51,6 +51,7 @@ function scoreMarkdown(qoqMarkdownPct) {
 }
 
 function scoreSectorConcentration(softwarePct, top10Pct) {
+  if (softwarePct == null && top10Pct == null) return { key: 'concentration', label: 'Sector Concentration', weight: 0.15, raw: 50, display: 'N/A', qualLabel: 'Data not yet available', explanation: 'Awaiting document parse.' };
   let raw = 100, flags = [];
   if      (softwarePct > 30) { raw -= 25; flags.push(`Software ${softwarePct?.toFixed(0)}% (>30%)`); }
   else if (softwarePct > 20) { raw -= 12; flags.push(`Software ${softwarePct?.toFixed(0)}% (elevated)`); }
